@@ -24,37 +24,45 @@ export const PLATFORMS = {
 const DEFAULT_PLATFORM = 'win10';
 const DEFAULT_ARCH = 'x64';
 
+/**
+ * 制品分类：依赖库里的散件按用途区分，和平台/架构一样是正式维度。
+ * 系统依赖打进主程序只是打包策略，不影响这里对制品类型的划分。
+ * 新增分类时这里和前端 CATEGORY_ORDER / CATEGORY_CLASS 一起改。
+ */
+const CATEGORY_LABEL = {
+  installer: '安装包',
+  runtime: '运行时依赖',
+  driver: '驱动',
+  patch: '补丁',
+  other: '未分类',
+};
+
+const DEFAULT_CATEGORY = 'other';
+
 /** 展示层元信息。Gitea 里没登记的包会走 fallback，不会因为漏配而消失。 */
 const META = {
-  'demo-cli': {
-    name: 'Demo CLI',
-    description: '轻量命令行工具。',
-    category: 'tool',
-    tags: ['命令行'],
-  },
   'runtime-pack': {
     name: '内置运行时组件包',
     description: '运行时组件，可独立更新。',
     category: 'runtime',
-    tags: ['运行时'],
+    tags: [],
   },
-};
-
-const CATEGORY_LABEL = {
-  runtime: '运行时',
-  driver: '驱动',
-  patch: '补丁',
-  tool: '工具',
+  'demo-client': {
+    name: '客户端安装包',
+    description: '主程序安装包，含内置运行时。',
+    category: 'installer',
+    tags: ['安装包'],
+  },
 };
 
 function metaOf(code) {
   const m = META[code] || {};
-  const category = m.category || 'runtime';
+  const category = m.category || DEFAULT_CATEGORY;
   return {
     name: m.name || code,
     description: m.description || '',
     category,
-    categoryLabel: CATEGORY_LABEL[category] || '运行时',
+    categoryLabel: CATEGORY_LABEL[category] || CATEGORY_LABEL[DEFAULT_CATEGORY],
     platform: m.platform || DEFAULT_PLATFORM,
     arch: m.arch || DEFAULT_ARCH,
     tags: m.tags || [],
