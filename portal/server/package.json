@@ -1,0 +1,14 @@
+{
+  "name": "dep-portal-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "依赖库客户端门面（本地测试版）：把 Gitea generic registry 包成方案 1.5 的 /client/deps 契约",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch src/index.js",
+    "start": "node --env-file-if-exists=.env src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
