@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchCatalog, type CatalogResponse, type Dependency } from './lib/api';
-import { downloadWithProgress } from './lib/download';
+
 import { DependencyCard, type DownloadState } from './components/DependencyCard';
 import { VersionDrawer } from './components/VersionDrawer';
 import { IconSearch, IconShield } from './components/Icons';
 
-const EMPTY: DownloadState = { status: 'idle', loaded: 0, total: null };
+const EMPTY: DownloadState = { status: 'idle' };
 
-const CATEGORY_ORDER = ['runtime', 'tool', 'driver', 'patch'];
+const CATEGORY_ORDER = ['installer', 'runtime', 'driver', 'patch', 'other'];
 
 const PLATFORM_FILTERS = [
   { key: 'all', label: '全部系统' },
@@ -58,35 +58,21 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 3200);
   }, []);
 
+  /**
+   * 下载由 <a href> 交给浏览器原生处理，下载任务归浏览器管，刷新页面不中断。
+   * 这里只做「刚点过」的视觉反馈，不介入下载本身。
+   */
   const startDownload = useCallback(
-    async (item: Dependency, version?: string) => {
+    (item: Dependency, version?: string) => {
       const ver = version || item.version;
       const key = `${item.key}@${ver}`;
-      const target = version ? item.versions.find((v) => v.version === version) : null;
-      const url = target?.download_url || item.download_url;
-      const fileName = item.file_name;
 
-      setDownloads((prev) => ({ ...prev, [key]: { status: 'running', loaded: 0, total: item.size } }));
+      setDownloads((prev) => ({ ...prev, [key]: { status: 'done' } }));
+      notify('ok', `已开始下载 ${item.file_name}`);
 
-      try {
-        const mode = await downloadWithProgress(url, fileName, item.size, ({ loaded, total }) => {
-          setDownloads((prev) => ({
-            ...prev,
-            [key]: { status: 'running', loaded, total: total ?? item.size },
-          }));
-        });
-        setDownloads((prev) => ({
-          ...prev,
-          [key]: { status: 'done', loaded: item.size, total: item.size },
-        }));
-        notify('ok', mode === 'native' ? `已交给浏览器下载 ${fileName}` : `${fileName} 下载完成`);
-        window.setTimeout(() => {
-          setDownloads((prev) => ({ ...prev, [key]: EMPTY }));
-        }, 4000);
-      } catch (err) {
-        setDownloads((prev) => ({ ...prev, [key]: { ...EMPTY, status: 'error' } }));
-        notify('err', err instanceof Error ? err.message : '下载失败');
-      }
+      window.setTimeout(() => {
+        setDownloads((prev) => ({ ...prev, [key]: EMPTY }));
+      }, 2500);
     },
     [notify],
   );

@@ -387,12 +387,19 @@ main {
   border: 1px solid #dbe6ff;
 }
 
-.cat-tool {
-  color: var(--teal);
+.cat-installer {
+  color: #4338ca;
 }
-.card__icon.cat-tool {
-  background: #e9faf4;
-  border-color: #d2f2e8;
+.card__icon.cat-installer {
+  background: #eef0ff;
+  border-color: #dcdfff;
+}
+.cat-other {
+  color: #64748b;
+}
+.card__icon.cat-other {
+  background: #f3f5f9;
+  border-color: #e3e8f0;
 }
 .cat-driver {
   color: var(--amber);
@@ -444,6 +451,34 @@ main {
 .tag--ghost {
   background: #f2f5fa;
   color: #5b6679;
+}
+
+/* 分类标签跟随分类色 */
+
+.tag--category {
+  background: #f2f5fa;
+  color: #5b6679;
+  font-weight: 600;
+}
+
+.tag--category.cat-installer {
+  background: #eef0ff;
+  color: #4338ca;
+}
+
+.tag--category.cat-runtime {
+  background: #eef3ff;
+  color: #1d4ed8;
+}
+
+.tag--category.cat-driver {
+  background: #fdf3e5;
+  color: #a25c07;
+}
+
+.tag--category.cat-patch {
+  background: #f4efff;
+  color: #6d42c4;
 }
 
 .tag--live {
@@ -687,35 +722,20 @@ main {
   height: 32px;
 }
 
-.spinner {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #fff;
-  animation: spin 0.7s linear infinite;
+/* 下载按钮是 <a>，交给浏览器原生下载 */
+
+a.btn {
+  text-decoration: none;
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+a.btn--primary,
+a.btn--primary:visited {
+  color: #fff;
 }
 
-.card__progress {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  background: #eef2f9;
-}
-
-.card__progress span {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, #0e9f7e, #3b63f6);
-  transition: width 0.2s ease;
+a.btn--ghost,
+a.btn--ghost:visited {
+  color: var(--text-2);
 }
 
 /* skeleton */

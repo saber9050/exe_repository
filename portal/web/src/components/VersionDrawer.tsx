@@ -51,14 +51,14 @@ export function VersionDrawer({ item, onClose, onDownload }: Props) {
                 </div>
                 <span className="versions__date">{formatDate(v.created_at)}</span>
               </div>
-              <button
-                type="button"
+              <a
                 className={`btn ${v.is_latest ? 'btn--primary' : 'btn--ghost'} btn--sm`}
+                href={v.download_url}
                 onClick={() => onDownload(item, v.version)}
               >
                 <IconDownload size={15} />
                 下载
-              </button>
+              </a>
             </li>
           ))}
         </ul>

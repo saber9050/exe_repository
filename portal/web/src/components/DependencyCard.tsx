@@ -2,10 +2,9 @@ import type { Dependency } from '../lib/api';
 import { formatBytes, formatDate } from '../lib/format';
 import { IconCheck, IconDownload, IconPackage, IconPlatform } from './Icons';
 
+/** 下载交给浏览器原生处理，页面只记「刚点过」这一下，不再维护进度。 */
 export type DownloadState = {
-  status: 'idle' | 'running' | 'done' | 'error';
-  loaded: number;
-  total: number | null;
+  status: 'idle' | 'done';
 };
 
 type Props = {
@@ -16,21 +15,20 @@ type Props = {
 };
 
 const CATEGORY_CLASS: Record<string, string> = {
+  installer: 'cat-installer',
   runtime: 'cat-runtime',
   driver: 'cat-driver',
   patch: 'cat-patch',
-  tool: 'cat-tool',
+  other: 'cat-other',
 };
 
 export function DependencyCard({ item, state, onDownload, onShowVersions }: Props) {
-  const running = state?.status === 'running';
-  const percent =
-    running && state?.total ? Math.min(100, Math.round((state.loaded / state.total) * 100)) : null;
+  const clicked = state?.status === 'done';
 
   return (
     <article className="card">
       <div className="card__top">
-        <div className={`card__icon ${CATEGORY_CLASS[item.category] || 'cat-runtime'}`}>
+        <div className={`card__icon ${CATEGORY_CLASS[item.category] || 'cat-other'}`}>
           <IconPackage size={22} />
         </div>
         <div className="card__title">
@@ -46,7 +44,9 @@ export function DependencyCard({ item, state, onDownload, onShowVersions }: Prop
       {item.description && <p className="card__desc">{item.description}</p>}
 
       <div className="card__tags">
-        <span className="tag tag--ghost">{item.category_label}</span>
+        <span className={`tag tag--category ${CATEGORY_CLASS[item.category] || 'cat-other'}`}>
+          {item.category_label}
+        </span>
         {item.tags
           .filter((t) => t !== item.category_label)
           .map((t) => (
@@ -85,21 +85,15 @@ export function DependencyCard({ item, state, onDownload, onShowVersions }: Prop
             </button>
           )}
 
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={running}
+          <a
+            className={`btn btn--primary ${clicked ? 'is-clicked' : ''}`}
+            href={item.download_url}
             onClick={() => onDownload(item)}
           >
-            {running ? (
-              <>
-                <span className="spinner" />
-                {percent !== null ? `${percent}%` : formatBytes(state?.loaded ?? 0)}
-              </>
-            ) : state?.status === 'done' ? (
+            {clicked ? (
               <>
                 <IconCheck size={16} />
-                已下载
+                已开始
               </>
             ) : (
               <>
@@ -107,15 +101,9 @@ export function DependencyCard({ item, state, onDownload, onShowVersions }: Prop
                 下载
               </>
             )}
-          </button>
+          </a>
         </div>
       </div>
-
-      {running && (
-        <div className="card__progress">
-          <span style={{ width: `${percent ?? 8}%` }} />
-        </div>
-      )}
     </article>
   );
 }
