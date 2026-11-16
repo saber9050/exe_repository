@@ -24,7 +24,6 @@ export type Dependency = {
   version: string;
   file_name: string;
   size: number;
-  sha256: string | null;
   updated_at: string | null;
   download_url: string;
   versions: DependencyVersion[];

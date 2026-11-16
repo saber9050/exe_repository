@@ -161,71 +161,6 @@ main {
   line-height: 1.75;
 }
 
-/* ---------- 底部校验说明 ---------- */
-
-.verify {
-  display: grid;
-  grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
-  gap: 44px;
-  align-items: start;
-  margin-top: 52px;
-  padding-top: 30px;
-  border-top: 1px solid var(--line);
-}
-
-.verify__intro h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--text);
-}
-
-.verify__intro p {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.75;
-  color: var(--muted);
-}
-
-.verify__codes {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 26px;
-}
-
-.verify__label {
-  display: block;
-  margin-bottom: 7px;
-  font-size: 11px;
-  letter-spacing: 0.7px;
-  color: var(--muted);
-}
-
-.verify__item pre {
-  margin: 0;
-  padding-left: 13px;
-  border-left: 2px solid var(--line-strong);
-  overflow-x: auto;
-}
-
-.verify__item code {
-  font-size: 11.5px;
-  line-height: 1.85;
-  color: #33415c;
-  white-space: pre;
-}
-
-.c-dim {
-  color: #98a2b3;
-}
-
-.c-comment {
-  color: #9aa5b8;
-}
-
 /* ---------- toolbar ---------- */
 
 .toolbar {
@@ -516,7 +451,21 @@ main {
   color: #0b7a61;
 }
 
-/* 平台徽章 */
+/* 平台 / 架构徽章 */
+
+.card__badges {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.card__badges .tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  line-height: 1.6;
+}
 
 .tag--platform {
   font-weight: 600;
@@ -545,6 +494,27 @@ main {
   background: #fff7ed;
   border: 1px solid #fed7aa;
   color: #b45309;
+}
+
+.tag--arch {
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: #e8eef7;
+  border: 1px solid #d5e0ef;
+  color: #33465e;
+}
+
+.tag--arch.arch-x86 {
+  background: #fbeedd;
+  border-color: #f2d9b8;
+  color: #8a5a12;
+}
+
+.tag--arch.arch-arm64 {
+  background: #e6f1ef;
+  border-color: #cfe6e1;
+  color: #0d6b5c;
 }
 
 .platform.platform-win7 {
@@ -604,33 +574,6 @@ main {
   color: var(--text);
 }
 
-.card__hash {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: #f6f8fd;
-  border: 1px solid var(--line);
-}
-
-.card__hash-label {
-  font-size: 10px;
-  letter-spacing: 0.8px;
-  color: #8b96ab;
-}
-
-.card__hash code {
-  flex: 1;
-  min-width: 0;
-  font-size: 11px;
-  color: #4a5878;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .card__foot {
   display: flex;
   align-items: center;
@@ -644,16 +587,6 @@ main {
   gap: 6px;
   font-size: 11.5px;
   font-weight: 500;
-}
-
-.platform__arch {
-  padding: 1px 6px;
-  border-radius: 5px;
-  background: #f1f4fa;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  font-weight: 400;
 }
 
 .card__actions {
@@ -1071,11 +1004,6 @@ main {
 /* ---------- responsive ---------- */
 
 @media (max-width: 900px) {
-  .verify {
-    grid-template-columns: 1fr;
-    gap: 24px;
-  }
-
   main {
     padding-top: 36px;
   }

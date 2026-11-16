@@ -17,6 +17,12 @@ const PLATFORM_FILTERS = [
   { key: 'linux', label: 'Linux' },
 ];
 
+const ARCH_OPTIONS = [
+  { value: 'x64', label: 'x64（64 位）' },
+  { value: 'x86', label: 'x86（32 位）' },
+  { value: 'arm64', label: 'arm64' },
+];
+
 export default function App() {
   const [data, setData] = useState<CatalogResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -114,7 +120,8 @@ export default function App() {
     return list.length > 1 ? [{ key: 'all', label: '全部类型' }, ...list] : [];
   }, [items]);
 
-  const arches = useMemo(() => [...new Set(items.map((i) => i.arch))].sort(), [items]);
+  /** 架构选项固定列出三档，32 位不因为暂时没有制品而从下拉里消失。 */
+  const showArchFilter = items.length > 0;
 
   return (
     <div className="app">
@@ -139,8 +146,7 @@ export default function App() {
             运行时依赖<span className="hero__accent">下载中心</span>
           </h1>
           <p className="hero__desc">
-            按系统选择对应构建：Windows 7、Windows 10 及以上、macOS、Linux。
-            每个文件都附带 SHA-256 校验值，可自行核对完整性。
+            按系统选择对应构建：Windows 7、Windows 10 及以上、macOS、Linux，下载即用。
           </p>
         </section>
 
@@ -192,13 +198,13 @@ export default function App() {
           )}
 
           <div className="toolbar__right">
-            {arches.length > 1 && (
+            {showArchFilter && (
               <label className="select">
                 <select value={arch} onChange={(e) => setArch(e.target.value)} aria-label="架构筛选">
                   <option value="">全部架构</option>
-                  {arches.map((a) => (
-                    <option value={a} key={a}>
-                      {a}
+                  {ARCH_OPTIONS.map((a) => (
+                    <option value={a.value} key={a.value}>
+                      {a.label}
                     </option>
                   ))}
                 </select>
@@ -268,38 +274,6 @@ export default function App() {
             )}
           </section>
         )}
-
-        <section className="verify">
-          <div className="verify__intro">
-            <h2>
-              <IconShield size={17} />
-              下载后先校验
-            </h2>
-            <p>下载后核对 SHA-256，与卡片上显示的一致再运行。</p>
-          </div>
-
-          <div className="verify__codes">
-            <div className="verify__item">
-              <span className="verify__label">Windows</span>
-              <pre>
-                <code>
-                  <span className="c-dim">PS&gt;</span> Get-FileHash .\
-                  {items[0]?.file_name ?? '文件名.exe'} `{'\n'}
-                  {'    '}-Algorithm SHA256
-                </code>
-              </pre>
-            </div>
-
-            <div className="verify__item">
-              <span className="verify__label">macOS / Linux</span>
-              <pre>
-                <code>
-                  <span className="c-dim">$</span> shasum -a 256 ./文件名
-                </code>
-              </pre>
-            </div>
-          </div>
-        </section>
       </main>
 
       <footer className="footer">

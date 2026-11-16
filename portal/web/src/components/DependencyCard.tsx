@@ -1,6 +1,6 @@
 import type { Dependency } from '../lib/api';
-import { copyText, formatBytes, formatDate, shortHash } from '../lib/format';
-import { IconCheck, IconCopy, IconDownload, IconPackage, IconPlatform } from './Icons';
+import { formatBytes, formatDate } from '../lib/format';
+import { IconCheck, IconDownload, IconPackage, IconPlatform } from './Icons';
 
 export type DownloadState = {
   status: 'idle' | 'running' | 'done' | 'error';
@@ -37,7 +37,10 @@ export function DependencyCard({ item, state, onDownload, onShowVersions }: Prop
           <h3>{item.name}</h3>
           <code className="card__code">{item.code}</code>
         </div>
-        <span className={`tag tag--platform platform-${item.platform}`}>{item.platform_label}</span>
+        <div className="card__badges">
+          <span className={`tag tag--platform platform-${item.platform}`}>{item.platform_label}</span>
+          <span className={`tag tag--arch arch-${item.arch}`}>{item.arch}</span>
+        </div>
       </div>
 
       {item.description && <p className="card__desc">{item.description}</p>}
@@ -68,30 +71,10 @@ export function DependencyCard({ item, state, onDownload, onShowVersions }: Prop
         </div>
       </dl>
 
-      <div className="card__hash">
-        <span className="card__hash-label">SHA-256</span>
-        <code className="mono" title={item.sha256 || '校验和计算中'}>
-          {shortHash(item.sha256)}
-        </code>
-        <button
-          type="button"
-          className="icon-btn"
-          title="复制完整校验和"
-          disabled={!item.sha256}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (item.sha256) copyText(item.sha256);
-          }}
-        >
-          <IconCopy size={14} />
-        </button>
-      </div>
-
       <div className="card__foot">
         <span className={`platform platform-${item.platform}`}>
           <IconPlatform os={item.os} size={15} />
           {item.platform_label}
-          <span className="platform__arch">{item.arch}</span>
         </span>
 
         <div className="card__actions">

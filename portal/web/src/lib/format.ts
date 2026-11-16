@@ -16,18 +16,3 @@ export function formatDate(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return '—';
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
-
-export function shortHash(hash: string | null | undefined, head = 10, tail = 6): string {
-  if (!hash) return '计算中';
-  if (hash.length <= head + tail + 1) return hash;
-  return `${hash.slice(0, head)}…${hash.slice(-tail)}`;
-}
-
-export async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
