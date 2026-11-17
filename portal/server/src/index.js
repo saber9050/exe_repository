@@ -18,7 +18,8 @@ import { openArtifact, giteaConfig } from './gitea.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
-const WEB_DIST = path.resolve(__dirname, '../../web/dist');
+// 前端是纯静态页（html + css + 原生 js），没有构建产物，直接托管 web 目录
+const WEB_ROOT = path.resolve(__dirname, '../../web');
 
 const app = express();
 app.disable('x-powered-by');
@@ -93,25 +94,16 @@ app.get(
   }),
 );
 
-// 生产构建产物：npm --prefix web run build 之后可直接用这一个进程跑
-if (fs.existsSync(WEB_DIST)) {
+// 静态页面：目录里没有构建步骤，改完文件刷新即生效，统一不缓存
+if (fs.existsSync(WEB_ROOT)) {
   app.use(
-    express.static(WEB_DIST, {
-      index: false,
-      maxAge: '1h',
-      setHeaders: (res, filePath) => {
-        // 带 hash 的静态资源可以长缓存，入口 HTML 必须每次回源，
-        // 否则重新构建后浏览器会拿着旧 HTML 去找已删除的旧 JS，直接白屏。
-        if (filePath.endsWith('index.html')) {
-          res.setHeader('Cache-Control', 'no-cache');
-        }
+    express.static(WEB_ROOT, {
+      index: 'index.html',
+      setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'no-cache');
       },
     }),
   );
-  app.get('*', (_req, res) => {
-    res.setHeader('Cache-Control', 'no-cache');
-    res.sendFile(path.join(WEB_DIST, 'index.html'));
-  });
 }
 
 app.use((err, _req, res, _next) => {

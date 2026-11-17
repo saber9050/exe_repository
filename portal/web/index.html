@@ -1,14 +1,97 @@
 <!doctype html>
 <html lang="zh-CN">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="依赖库 · 运行时组件与工具下载" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="依赖库 · Windows / macOS / Linux 组件下载" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <title>依赖库 · 公共资源中心</title>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div class="app">
+      <div class="bg-grid" aria-hidden="true"></div>
+
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand__mark">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3 5 6v5.5c0 4.3 2.9 7.6 7 9.5 4.1-1.9 7-5.2 7-9.5V6l-7-3Z" />
+              <path d="m9 12 2 2 4-4" />
+            </svg>
+          </div>
+          <div class="brand__text">
+            <span class="brand__name">公共资源中心</span>
+            <span class="brand__sub">依赖库</span>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <span class="eyebrow">WINDOWS · MACOS · LINUX</span>
+          <h1>运行时依赖<span class="hero__accent">下载中心</span></h1>
+          <p class="hero__desc">
+            按系统选择对应构建：Windows 7、Windows 10 及以上、macOS、Linux，下载即用。
+          </p>
+        </section>
+
+        <section class="toolbar">
+          <div class="search">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.2-3.2" />
+            </svg>
+            <input id="q" type="text" placeholder="搜索组件名称或关键词" aria-label="搜索组件" autocomplete="off" />
+            <button type="button" class="search__clear" id="qClear" hidden>清除</button>
+          </div>
+
+          <div class="segmented" id="platforms" role="group" aria-label="系统平台">
+            <button type="button" data-platform="all" class="is-active">全部系统</button>
+            <button type="button" data-platform="win7">Windows 7</button>
+            <button type="button" data-platform="win10">Windows 10+</button>
+            <button type="button" data-platform="macos">macOS</button>
+            <button type="button" data-platform="linux">Linux</button>
+          </div>
+
+          <span class="toolbar__sep" id="catSep" hidden></span>
+          <div class="chips" id="categories"></div>
+
+          <div class="toolbar__right">
+            <label class="select" id="archWrap" hidden>
+              <select id="arch" aria-label="架构筛选">
+                <option value="">全部架构</option>
+                <option value="x64">x64（64 位）</option>
+                <option value="x86">x86（32 位）</option>
+                <option value="arm64">arm64</option>
+              </select>
+            </label>
+            <button type="button" class="icon-text" id="refresh">刷新</button>
+          </div>
+        </section>
+
+        <div class="alert" id="alert" hidden>
+          <strong>加载失败</strong>
+          <span id="alertText"></span>
+          <button type="button" class="btn btn--ghost btn--sm" id="retry">重试</button>
+        </div>
+
+        <section class="grid" id="grid" aria-live="polite"></section>
+
+        <section class="empty" id="empty" hidden>
+          <div class="empty__icon">∅</div>
+          <h3 id="emptyTitle">暂时没有可下载的内容</h3>
+          <p id="emptyDesc">组件正在陆续上架，稍后再来看看。</p>
+          <button type="button" class="btn btn--ghost btn--sm" id="clearFilters" hidden>清空筛选</button>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>© 2026 公共资源中心</span>
+      </footer>
+    </div>
+
+    <script src="app.js"></script>
   </body>
 </html>

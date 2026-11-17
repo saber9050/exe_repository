@@ -3,19 +3,23 @@
 公共资源中心「依赖库」模块的客户端下载页。展示 Gitea generic registry 里的制品，
 按 **平台 / 架构 / 分类** 组织，点击即下载。
 
+前端是纯静态页面（HTML + CSS + 原生 JS），**没有框架、没有构建步骤**，改完文件刷新即生效。
+这样 Windows 7 上能装的旧版 Chrome / Edge 也能正常打开。
+
 ## 目录结构
 
 ```
 portal/
-├── server/          门面服务（Express）
-│   ├── src/index.js    /client/deps 接口 + 生产环境托管前端
+├── server/          门面服务（Express，唯一需要装依赖的部分）
+│   ├── src/index.js    /client/deps 接口 + 托管前端静态文件
 │   ├── src/catalog.js  制品目录：拉包、识别平台与架构、组装目录项
 │   ├── src/gitea.js    Gitea API 封装（列包、取文件、带 Range 转发字节）
 │   └── .env.example    配置模板
-└── web/             前端（React 18 + Vite 5 + TypeScript）
-    ├── src/App.tsx
-    ├── src/components/
-    └── src/styles.css
+└── web/             前端静态资源（无构建）
+    ├── index.html     页面骨架
+    ├── app.js         全部交互逻辑
+    ├── styles.css     样式
+    └── favicon.svg
 ```
 
 ## 环境要求
@@ -29,49 +33,27 @@ nvm use 22.22.2
 node -v          # 应输出 v22.x
 ```
 
-## 五分钟跑起来
+前端没有依赖，浏览器要求见文末「浏览器兼容性」。
+
+## 跑起来
 
 ```bash
-# 1. 安装依赖
-cd portal/server && npm install
-cd ../web && npm install
+# 1. 装依赖（只有服务端有依赖）
+cd portal/server
+npm install
 
 # 2. 配置（首次运行才需要）
-cd ../server
 cp .env.example .env
 # 编辑 .env，填 GITEA_TOKEN，获取方式见 .env.example 里的注释
 
-# 3. 构建前端
-cd ../web && npm run build
-
-# 4. 启动，接口和页面在同一个端口
-cd ../server && npm start
+# 3. 启动
+npm start
 ```
 
-打开 <http://localhost:8787>。
+打开 <http://localhost:8787>，接口和页面在同一个端口。
 
-### 开发模式（前端热更新）
-
-前后端分开跑，Vite 把 `/client` 代理到门面：
-
-```bash
-# 终端 1
-cd portal/server && npm run dev     # http://localhost:8787（--watch 自动重启）
-
-# 终端 2
-cd portal/web && npm run dev        # http://localhost:5173
-```
-
-改前端代码时访问 5173，改服务端时 8787 会自动重启。
-
-### 生产模式
-
-前端构建产物在 `web/dist`，门面检测到该目录就直接托管：
-
-```bash
-cd portal/web && npm run build
-cd ../server && npm start           # 单进程，只需 8787 一个端口
-```
+开发时改 `web/index.html`、`web/app.js`、`web/styles.css` 直接刷新浏览器即可，
+不需要编译。改服务端代码用 `npm run dev`（`--watch` 自动重启）。
 
 ## 配置项
 
@@ -136,13 +118,12 @@ const META = {
 
 没登记的包照常显示，用包名当名称、分类落到「未分类」。
 
-新增一个分类要同时改三个地方：
+新增一个分类要改两个地方：
 
 | 文件 | 改动 |
 | --- | --- |
 | `server/src/catalog.js` | `CATEGORY_LABEL` 加键值 |
-| `web/src/App.tsx` | `CATEGORY_ORDER` 加进排序 |
-| `web/src/components/DependencyCard.tsx` | `CATEGORY_CLASS` 加样式映射 |
+| `web/app.js` | `CATEGORY_ORDER` 加进排序，`CATEGORY_CLASS` 加样式映射 |
 
 ## 接口
 
@@ -161,6 +142,22 @@ GET /client/deps/{code}/versions/{version}/download
 下载响应带 `Content-Disposition: attachment` 和 `Accept-Ranges: bytes`，
 浏览器直接接管下载，支持断点续传。
 
+## 浏览器兼容性
+
+前端只用了 ES2015 语法（`const` / 箭头函数 / 模板字符串 / `fetch` / `Promise`）
+和 CSS 变量、Flexbox、Grid，**没有使用可选链、空值合并、`Array.flat`、`padStart`**
+这类较新的语法，也没有用 ES Module（`<script type="module">`），
+避免旧内核因为模块解析失败而整页白屏。
+
+| 浏览器 | 支持情况 |
+| --- | --- |
+| Chrome 51+ / Edge 79+ | 完整支持 |
+| Firefox 54+ | 完整支持 |
+| Windows 7 上的 Chrome 109 / Edge 109 | 完整支持 |
+| IE 11 | **不支持**（缺 CSS 变量与 `Promise`） |
+
+改代码时注意别引入上面列出的新语法，`node --check web/app.js` 可以过一遍基础语法。
+
 ## 常见问题
 
 **页面能打开但没有制品**
@@ -171,11 +168,15 @@ GET /client/deps/{code}/versions/{version}/download
 Node 版本太低，`nvm use 22.22.2` 再跑。
 
 **端口被占用**
-改 `.env` 里的 `PORT`，前端开发模式还要同步改 `web/vite.config.ts` 的代理目标。
+改 `.env` 里的 `PORT`。
 
-**部署后前端白屏**
-`index.html` 已经设成 `no-cache`，带 hash 的静态资源是长缓存。
-如果还是白屏，检查 `web/dist` 是否是最近一次 `npm run build` 的产物。
+**改了 `web` 下的文件但页面没变**
+服务端对静态文件设了 `no-cache`，正常刷新即可；如果还不变，检查是不是开了别的端口
+（比如之前 `vite` 的 5173）。
 
 **目录数据不是最新的**
-服务端有 15 秒缓存，刷新页面不会绕过。加 `?refresh=1` 或等 15 秒。
+服务端有 15 秒缓存，刷新页面不会绕过。加 `?refresh=1` 或点页面上的「刷新」按钮。
+
+**Windows 7 上打开空白页**
+先按 F12 看 Console 有没有语法错误。如果是 `Unexpected token` 之类，
+说明新代码里混进了 ES2018+ 语法（可选链 `?.`、空值合并 `??` 最常见），改回兼容写法。
