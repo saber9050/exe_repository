@@ -17,6 +17,12 @@
     patch: 'cat-patch'
   };
 
+  var CATEGORY_LABEL = {
+    installer: '安装包',
+    runtime: '运行时',
+    patch: '补丁'
+  };
+
   // 内联图标，避免额外请求
   var ICON = {
     package:
@@ -198,20 +204,25 @@
     });
   }
 
+  /**
+   * 分类筛选固定展示三档，不随数据增减。管理端新增分类时，
+   * 数据里出现但不在固定表里的 key 会追加到末尾，避免筛选项突然消失。
+   */
   function categoryList() {
-    var seen = {};
-    var list = [];
+    var list = CATEGORY_ORDER.map(function (key) {
+      return { key: key, label: CATEGORY_LABEL[key] || key };
+    });
     state.items.forEach(function (item) {
-      if (!seen[item.category]) {
-        seen[item.category] = true;
-        list.push({ key: item.category, label: item.category_label });
+      if (!item.category || CATEGORY_ORDER.indexOf(item.category) !== -1) return;
+      var exists = false;
+      for (var i = 0; i < list.length; i += 1) {
+        if (list[i].key === item.category) exists = true;
+      }
+      if (!exists) {
+        list.push({ key: item.category, label: item.category_label || item.category });
       }
     });
-    list.sort(function (a, b) {
-      return CATEGORY_ORDER.indexOf(a.key) - CATEGORY_ORDER.indexOf(b.key);
-    });
-    // 只有一种分类时没必要显示筛选
-    return list.length > 1 ? [{ key: 'all', label: '全部类型' }].concat(list) : [];
+    return [{ key: 'all', label: '全部类型' }].concat(list);
   }
 
   /* ---------------- 渲染：筛选区 ---------------- */
@@ -219,7 +230,7 @@
   function renderCategories() {
     var list = categoryList();
     dom.categories.innerHTML = '';
-    dom.catSep.hidden = list.length === 0;
+    dom.catSep.hidden = false;
 
     list.forEach(function (cat) {
       var btn = node('button', 'chip' + (state.category === cat.key ? ' is-active' : ''), cat.label);

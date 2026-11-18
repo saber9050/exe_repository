@@ -267,10 +267,11 @@ main {
 }
 
 .toolbar__sep {
+  flex: 0 0 1px;
   width: 1px;
-  height: 18px;
-  background: var(--line-strong);
-  margin: 0 2px;
+  height: 20px;
+  background: #c3ccdd;
+  margin: 0 4px;
 }
 
 .chip {
