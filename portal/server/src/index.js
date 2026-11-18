@@ -75,9 +75,16 @@ app.get(
       if (v) res.setHeader(h, v);
     }
     if (!res.getHeader('content-type')) res.setHeader('content-type', 'application/octet-stream');
+    // 头里只能出现 ASCII：中文文件名直接塞进 filename= 会让 Node 抛 ERR_INVALID_CHAR，
+    // 整个响应变成 500。按 RFC 6266 / 5987 拆两段：
+    //   filename=   给 ASCII 兜底（纯中文名换 download.exe 这种）
+    //   filename*=  给真实名，percent-encoded，现代浏览器优先用它
+    const fallbackName = /^[\x20-\x7E]+$/.test(target.fileName)
+      ? target.fileName.replace(/["\\]/g, '_')
+      : `download${path.extname(target.fileName).replace(/[^\x20-\x7E]/g, '')}`;
     res.setHeader(
       'content-disposition',
-      `attachment; filename="${target.fileName}"; filename*=UTF-8''${encodeURIComponent(target.fileName)}`,
+      `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(target.fileName)}`,
     );
 
     // 审计占位：生产环境这里是异步写 audit_log，不阻塞流
