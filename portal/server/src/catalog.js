@@ -45,11 +45,31 @@ function downloadUrl(code, version) {
   return `/client/deps/${encodeURIComponent(code)}/versions/${encodeURIComponent(version)}/download`;
 }
 
-/** 只认已启用版本，最新的排前面。 */
+/** 版本号比较（降序）：1.1.1 排在 1.0.2 前面，与上传时间无关。 */
+function compareVersionDesc(a, b) {
+  const parse = (input) => {
+    const raw = String(input || '0.0.0').split('+')[0];
+    const dash = raw.indexOf('-');
+    const core = dash === -1 ? raw : raw.slice(0, dash);
+    const pre = dash === -1 ? '' : raw.slice(dash + 1);
+    const nums = core.split('.').map((n) => parseInt(n, 10) || 0);
+    return { major: nums[0] || 0, minor: nums[1] || 0, patch: nums[2] || 0, pre };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (x.major !== y.major) return y.major - x.major;
+  if (x.minor !== y.minor) return y.minor - x.minor;
+  if (x.patch !== y.patch) return y.patch - x.patch;
+  if (x.pre && !y.pre) return 1;
+  if (!x.pre && y.pre) return -1;
+  return String(y.pre).localeCompare(String(x.pre));
+}
+
+/** 只认已启用版本，版本号高的排前面。 */
 function enabledVersions(manifest) {
   return (manifest.versions || [])
     .filter((v) => v.state === 'enabled')
-    .sort((a, b) => new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0));
+    .sort((a, b) => compareVersionDesc(a.version, b.version));
 }
 
 /** 把一份 manifest 展开成目录项：os × arch 的每种组合各一条。 */
@@ -59,7 +79,11 @@ function toItems(manifest) {
   const versions = enabledVersions(manifest);
   if (versions.length === 0) return [];
 
-  const latest = versions.find((v) => v.version === manifest.currentVersion) || versions[0];
+  /**
+   * 推荐版本 = 版本号最高的已启用版本，不看管理端的 currentVersion。
+   * 管理端的「当前版本」是给内部回滚用的，对外下载页永远推最新的那个。
+   */
+  const latest = versions[0];
   const file = fileNameOf(latest);
   const category = manifest.category || '';
   const platforms = [];
