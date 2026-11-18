@@ -8,14 +8,13 @@
 (function () {
   'use strict';
 
-  var CATEGORY_ORDER = ['installer', 'runtime', 'driver', 'patch', 'other'];
+  // 分类与管理端的 CATEGORIES 保持同一份：安装包 / 运行时 / 补丁
+  var CATEGORY_ORDER = ['installer', 'runtime', 'patch'];
 
   var CATEGORY_CLASS = {
     installer: 'cat-installer',
     runtime: 'cat-runtime',
-    driver: 'cat-driver',
-    patch: 'cat-patch',
-    other: 'cat-other'
+    patch: 'cat-patch'
   };
 
   // 内联图标，避免额外请求

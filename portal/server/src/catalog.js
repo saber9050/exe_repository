@@ -1,199 +1,105 @@
 /**
- * 依赖目录。
+ * 依赖目录：从仓库的 manifest.json 生成下载页的目录项。
  *
- * 生产环境这里读 MySQL 的 asset / asset_version（row_kind='main' 且 enabled）。
- * 本地测试版没有 Hub 数据库，直接以 Gitea generic 包为事实来源：
- * 包在 Gitea 上 = 已发布，包的最新版本 = 生效版本。
+ * 数据来源是管理端（exe-release）写入的 `deps/{code}/manifest.json`，
+ * 不是 generic 包的元数据 —— 制品文件名被统一压成 .dat 以规避前置链路拦截，
+ * 原始文件名、分类、平台、版本状态都只存在于 manifest 里。
  *
- * 平台维度：Windows / macOS / Linux，其中 Windows 再分 win7 与 win10+（含 Win11）。
- * 判定顺序是「文件名里的平台与架构标识」→ META 配置 → 默认值，因此上传时按
- *   xxx-win7.exe / xxx-win10.exe / xxx-macos-arm64.dmg / xxx-linux-x64.deb
- * 命名即可自动归位；认不出平台的制品不会进目录。
+ * 可见性口径与管理端保持一致：
+ *   资产 status === 'enabled' 才展示；版本 state === 'enabled' 才可下载。
  */
 
-import { listPackages, listFiles } from './gitea.js';
+import { listManifests, getManifest } from './gitea.js';
 
-/** 平台口径。win10 覆盖 Win10 / Win11。 */
+/** 平台口径。key 与管理端 OS_LIST 一致。 */
 export const PLATFORMS = {
-  win7: { key: 'win7', os: 'windows', label: 'Windows 7', short: 'Win 7' },
-  win10: { key: 'win10', os: 'windows', label: 'Windows 10+', short: 'Win 10+' },
-  macos: { key: 'macos', os: 'macos', label: 'macOS', short: 'macOS' },
-  linux: { key: 'linux', os: 'linux', label: 'Linux', short: 'Linux' },
+  win7: { key: 'win7', os: 'windows', label: 'Windows 7' },
+  win10: { key: 'win10', os: 'windows', label: 'Windows 10+' },
+  macos: { key: 'macos', os: 'macos', label: 'macOS' },
+  linux: { key: 'linux', os: 'linux', label: 'Linux' },
 };
 
-const DEFAULT_PLATFORM = 'win10';
-const DEFAULT_ARCH = 'x64';
-
-/**
- * 制品分类：依赖库里的散件按用途区分，和平台/架构一样是正式维度。
- * 系统依赖打进主程序只是打包策略，不影响这里对制品类型的划分。
- * 新增分类时这里和前端 CATEGORY_ORDER / CATEGORY_CLASS 一起改。
- */
+/** 分类口径。与管理端 CATEGORIES 保持同一份。 */
 const CATEGORY_LABEL = {
   installer: '安装包',
-  runtime: '运行时依赖',
-  driver: '驱动',
+  runtime: '运行时',
   patch: '补丁',
-  other: '未分类',
 };
 
-const DEFAULT_CATEGORY = 'other';
+/**
+ * 旧数据的平台别名。管理端早期只有笼统的 windows，
+ * 现在拆成 win7 / win10 两档，历史资产按 win10 处理，重新编辑 manifest 才会真正区分。
+ */
+const OS_ALIAS = { windows: 'win10' };
 
-/** 展示层元信息。Gitea 里没登记的包会走 fallback，不会因为漏配而消失。 */
-const META = {
-  'runtime-pack': {
-    name: '内置运行时组件包',
-    description: '运行时组件，可独立更新。',
-    category: 'runtime',
-    tags: [],
-  },
-  'demo-client': {
-    name: '客户端安装包',
-    description: '主程序安装包，含内置运行时。',
-    category: 'installer',
-    tags: ['安装包'],
-  },
-};
-
-function metaOf(code) {
-  const m = META[code] || {};
-  const category = m.category || DEFAULT_CATEGORY;
+function fileNameOf(version) {
+  const file = (version?.files || [])[0];
   return {
-    name: m.name || code,
-    description: m.description || '',
-    category,
-    categoryLabel: CATEGORY_LABEL[category] || CATEGORY_LABEL[DEFAULT_CATEGORY],
-    platform: m.platform || DEFAULT_PLATFORM,
-    arch: m.arch || DEFAULT_ARCH,
-    tags: m.tags || [],
+    name: file?.name || '',
+    storageName: file?.storageName || file?.path?.split('/').pop() || '',
+    size: Number(file?.size ?? version?.totalSize ?? 0),
   };
 }
 
-/**
- * 从文件名识别平台。认不出返回 null —— 这类文件（插件、说明、校验文件）不进依赖库目录。
- * 注意 .zip 太通用，只有文件名带 mac 字样时才当作 macOS 制品。
- */
-export function detectPlatform(fileName, fallback = DEFAULT_PLATFORM) {
-  const n = String(fileName).toLowerCase();
-  if (/win(dows)?[\s._-]?7\b/.test(n)) return 'win7';
-  if (/win(dows)?[\s._-]?(10|11)/.test(n)) return 'win10';
-  if (/mac\s?os|osx|darwin/.test(n) || /\.(dmg|pkg)$/.test(n)) return 'macos';
-  if (/linux|ubuntu|debian|centos|fedora|rocky/.test(n) || /\.(deb|rpm|appimage)$/.test(n) || /\.tar\.gz$/.test(n)) {
-    return 'linux';
+function downloadUrl(code, version) {
+  return `/client/deps/${encodeURIComponent(code)}/versions/${encodeURIComponent(version)}/download`;
+}
+
+/** 只认已启用版本，最新的排前面。 */
+function enabledVersions(manifest) {
+  return (manifest.versions || [])
+    .filter((v) => v.state === 'enabled')
+    .sort((a, b) => new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0));
+}
+
+/** 把一份 manifest 展开成目录项：os × arch 的每种组合各一条。 */
+function toItems(manifest) {
+  if (manifest.status !== 'enabled') return [];
+
+  const versions = enabledVersions(manifest);
+  if (versions.length === 0) return [];
+
+  const latest = versions.find((v) => v.version === manifest.currentVersion) || versions[0];
+  const file = fileNameOf(latest);
+  const category = manifest.category || '';
+  const platforms = [];
+  for (const raw of manifest.os || []) {
+    const key = OS_ALIAS[raw] || raw;
+    if (PLATFORMS[key] && platforms.indexOf(key) === -1) platforms.push(key);
   }
-  if (/\.exe$/.test(n)) return /win7/.test(n) ? 'win7' : fallback;
-  return null;
-}
+  const arches = (manifest.arch || []).filter(Boolean);
+  if (platforms.length === 0 || arches.length === 0) return [];
 
-/** 从文件名识别架构，识别不到用配置兜底。 */
-export function detectArch(fileName, fallback = DEFAULT_ARCH) {
-  const n = String(fileName).toLowerCase();
-  if (/arm64|aarch64/.test(n)) return 'arm64';
-  if (/x64|amd64|x86[_-]64/.test(n)) return 'x64';
-  if (/(^|[^a-z0-9])(x86|i386|ia32|386)([^a-z0-9]|$)/.test(n)) return 'x86';
-  return fallback;
-}
-
-function downloadUrl(code, version, platform, arch) {
-  const params = new URLSearchParams({ platform, arch });
-  return `/client/deps/${encodeURIComponent(code)}/versions/${encodeURIComponent(version)}/download?${params}`;
-}
-
-/** 版本号比较：优先按数字段，非数字段退回字符串比较。 */
-function compareVersion(a, b) {
-  const pa = String(a).split(/[.\-+]/);
-  const pb = String(b).split(/[.\-+]/);
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i += 1) {
-    const x = pa[i] ?? '0';
-    const y = pb[i] ?? '0';
-    const nx = Number(x);
-    const ny = Number(y);
-    if (!Number.isNaN(nx) && !Number.isNaN(ny)) {
-      if (nx !== ny) return nx - ny;
-    } else if (x !== y) {
-      return x < y ? -1 : 1;
-    }
-  }
-  return 0;
-}
-
-/** Gitea 的 list 接口按「包 + 版本」逐行返回，这里按包名聚合并倒序。 */
-function groupByPackage(pkgs) {
-  const map = new Map();
-  for (const pkg of pkgs) {
-    if (!map.has(pkg.name)) map.set(pkg.name, []);
-    map.get(pkg.name).push(pkg);
-  }
-  for (const list of map.values()) {
-    list.sort((a, b) => {
-      const byTime = new Date(b.created_at || 0) - new Date(a.created_at || 0);
-      if (byTime !== 0) return byTime;
-      return compareVersion(b.version, a.version);
-    });
-  }
-  return map;
-}
-
-/** 把一个版本里的制品按「平台 @ 架构」分组，同一组合多个文件取体积最大的。 */
-function groupByTarget(files, meta) {
-  const map = new Map();
-  for (const f of files) {
-    const platform = detectPlatform(f.name, meta.platform);
-    if (!platform) continue;
-    const arch = detectArch(f.name, meta.arch);
-    const key = `${platform}@${arch}`;
-    const prev = map.get(key);
-    if (!prev || f.size > prev.file.size) map.set(key, { platform, arch, file: f });
-  }
-  return map;
-}
-
-/** 一个包的每个「平台 @ 架构」各出一条目录项。 */
-async function buildItems(code, versions) {
-  const meta = metaOf(code);
-
-  // 逐版本查一次文件清单，才能让版本列表只出现真正含该平台构建的版本，
-  // 不给用户点到必然 404 的旧版本。生产环境这些信息来自 asset_version，没有额外请求。
-  const perVersion = await Promise.all(
-    versions.map(async (v) => {
-      const files = await listFiles(code, v.version).catch(() => []);
-      return { ...v, targets: groupByTarget(files, meta) };
-    }),
-  );
-
-  const latest = perVersion[0];
   const items = [];
-
-  for (const [key, { platform, arch, file }] of latest.targets) {
-    const p = PLATFORMS[platform];
-    items.push({
-      code,
-      key: `${code}@${key}`,
-      platform: p.key,
-      platform_label: p.label,
-      os: p.os,
-      arch,
-      name: meta.name,
-      description: meta.description,
-      category: meta.category,
-      category_label: meta.categoryLabel,
-      tags: meta.tags,
-      version: latest.version,
-      file_name: file.name,
-      size: file.size,
-      sha256: file.sha256,
-      updated_at: latest.created_at || null,
-      download_url: downloadUrl(code, latest.version, platform, arch),
-      versions: perVersion
-        .filter((v) => v.targets.has(key))
-        .map((v) => ({
+  for (const platformKey of platforms) {
+    const p = PLATFORMS[platformKey];
+    for (const arch of arches) {
+      items.push({
+        code: manifest.code,
+        key: `${manifest.code}@${platformKey}@${arch}`,
+        platform: p.key,
+        platform_label: p.label,
+        os: p.os,
+        arch,
+        name: manifest.displayName || manifest.code,
+        description: manifest.description || '',
+        category,
+        category_label: CATEGORY_LABEL[category] || category,
+        tags: Array.isArray(manifest.tags) ? manifest.tags : [],
+        version: latest.version,
+        file_name: file.name,
+        size: file.size,
+        updated_at: latest.publishedAt || manifest.updatedAt || null,
+        download_url: downloadUrl(manifest.code, latest.version),
+        versions: versions.map((v) => ({
           version: v.version,
-          created_at: v.created_at || null,
-          download_url: downloadUrl(code, v.version, platform, arch),
+          created_at: v.publishedAt || null,
+          changelog: v.changelog || '',
+          download_url: downloadUrl(manifest.code, v.version),
           is_latest: v.version === latest.version,
         })),
-    });
+      });
+    }
   }
   return items;
 }
@@ -204,16 +110,19 @@ const TTL = 15_000;
 export async function getCatalog({ q = '', os = '', arch = '', platform = '', refresh = false } = {}) {
   const now = Date.now();
   if (refresh || now - cache.at > TTL) {
-    const groups = groupByPackage(await listPackages());
     const items = [];
-    for (const [code, versions] of groups) {
-      try {
-        items.push(...(await buildItems(code, versions)));
-      } catch (err) {
-        console.error(`[catalog] 跳过 ${code}:`, err.message);
+    try {
+      const manifests = await listManifests();
+      for (const manifest of manifests) {
+        items.push(...toItems(manifest));
       }
+      items.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    } catch (err) {
+      // 仓库不可读时别把已有缓存冲掉，返回上一次结果比空白页好
+      console.error('[catalog] 读取 manifest 失败:', err.message);
+      if (cache.items.length === 0) throw err;
+      return { items: cache.items, updated_at: new Date(cache.at).toISOString() };
     }
-    items.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
     cache = { at: now, items };
   }
 
@@ -222,31 +131,41 @@ export async function getCatalog({ q = '', os = '', arch = '', platform = '', re
   if (arch && arch !== 'all') items = items.filter((i) => i.arch === arch);
   if (platform && platform !== 'all') items = items.filter((i) => i.platform === platform);
   if (q) {
-    const kw = q.toLowerCase();
+    const kw = String(q).toLowerCase();
     items = items.filter(
       (i) =>
         i.code.toLowerCase().includes(kw) ||
         i.name.toLowerCase().includes(kw) ||
         i.description.toLowerCase().includes(kw) ||
+        i.category_label.toLowerCase().includes(kw) ||
         i.platform_label.toLowerCase().includes(kw) ||
-        i.tags.some((t) => t.toLowerCase().includes(kw)),
+        i.tags.some((t) => String(t).toLowerCase().includes(kw)),
     );
   }
   return { items, updated_at: new Date(cache.at).toISOString() };
 }
 
-/** 下载前校验：版本存在，且该版本里有对应平台 + 架构的制品。 */
-export async function findVersion(code, version, platform, arch) {
-  let files;
-  try {
-    files = await listFiles(code, version);
-  } catch (err) {
-    if (err.status === 404) return null;
-    throw err;
-  }
-  const targets = groupByTarget(files, metaOf(code));
-  const key = platform && arch ? `${platform}@${arch}` : null;
-  const hit = key ? targets.get(key) : [...targets.values()].sort((a, b) => b.file.size - a.file.size)[0];
-  if (!hit) return null;
-  return { code, version, fileName: hit.file.name, size: hit.file.size, sha256: hit.file.sha256 };
+/**
+ * 下载前校验：资产必须启用、版本必须启用，且能拿到存储名。
+ * 平台/架构参数在这个模型下不参与定位（一个资产对应一套平台声明），
+ * 保留入参只是为了兼容旧链接。
+ */
+export async function findVersion(code, version) {
+  const manifest = await getManifest(code);
+  if (!manifest) return null;
+  if (manifest.status !== 'enabled') return null;
+
+  const row = (manifest.versions || []).find((v) => v.version === version);
+  if (!row || row.state !== 'enabled') return null;
+
+  const file = fileNameOf(row);
+  if (!file.storageName) return null;
+
+  return {
+    code,
+    version,
+    fileName: file.name,
+    storageName: file.storageName,
+    size: file.size,
+  };
 }

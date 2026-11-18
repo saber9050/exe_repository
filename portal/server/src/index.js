@@ -49,14 +49,14 @@ app.get(
   '/client/deps/:code/versions/:version/download',
   wrap(async (req, res) => {
     const { code, version } = req.params;
-    const platform = req.query.platform ? String(req.query.platform) : '';
-    const arch = req.query.arch ? String(req.query.arch) : '';
-    const target = await findVersion(code, version, platform, arch);
+    // 平台/架构不再参与定位：manifest 里一个资产对应一套平台声明，
+    // 这里只校验资产与版本是否启用。
+    const target = await findVersion(code, version);
     if (!target) {
-      return res.status(404).json({ message: '该版本不存在' });
+      return res.status(404).json({ message: '该版本不存在或未启用' });
     }
 
-    const upstream = await openArtifact(code, version, target.fileName, req.headers.range);
+    const upstream = await openArtifact(code, version, target.storageName, req.headers.range);
     if (!upstream.ok && upstream.status !== 206) {
       // 403/404 是判定问题，5xx 才是存储不可用
       const status = upstream.status >= 500 ? 500 : 404;
