@@ -45,6 +45,24 @@ app.get(
   }),
 );
 
+/**
+ * 下载前的轻量探测。前端点下载先发 HEAD，只校验 manifest 不碰上游字节，
+ * 失效时能拿到 4xx 原地提示，而不是让浏览器整页跳到 JSON。
+ */
+app.head(
+  '/client/deps/:code/versions/:version/download',
+  wrap(async (req, res) => {
+    const { code, version } = req.params;
+    const target = await findVersion(code, version);
+    if (!target) {
+      return res.status(404).end();
+    }
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Length', String(target.size || 0));
+    res.status(200).end();
+  }),
+);
+
 app.get(
   '/client/deps/:code/versions/:version/download',
   wrap(async (req, res) => {

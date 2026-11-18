@@ -448,6 +448,7 @@
       dl.href = v.download_url;
       dl.setAttribute('data-act', 'download');
       dl.setAttribute('data-key', item.key);
+      dl.setAttribute('data-file', v.file_name || item.file_name);
       dl.innerHTML = ICON.download + '<span>下载</span>';
       row.appendChild(dl);
 
@@ -489,14 +490,14 @@
   var toastTimer = null;
   var toastNode = null;
 
-  function toast(text) {
+  function toast(text, type) {
     if (toastTimer) {
       clearTimeout(toastTimer);
     }
     if (toastNode && toastNode.parentNode) {
       toastNode.parentNode.removeChild(toastNode);
     }
-    toastNode = node('div', 'toast toast--ok', text);
+    toastNode = node('div', 'toast ' + (type === 'err' ? 'toast--err' : 'toast--ok'), text);
     toastNode.setAttribute('role', 'status');
     document.body.appendChild(toastNode);
 
@@ -570,48 +571,74 @@
     render();
   });
 
-  dom.grid.addEventListener('click', function (e) {
-    var target = e.target;
-    // 从点击处向上找带 data-act 的元素（按钮或链接）
-    while (target && target !== dom.grid && !target.getAttribute) {
-      target = target.parentNode;
-    }
-    if (!target || !target.getAttribute) {
-      return;
-    }
-    var act = target.getAttribute('data-act');
-    if (!act) {
-      // 点到了图标或文字，往上找一层
-      var parent = target.parentNode;
-      if (parent && parent.getAttribute) {
-        act = parent.getAttribute('data-act');
-        if (act) {
-          target = parent;
-        }
+  /** 从事件目标往上找最近带 data-act 的元素。 */
+  function closestAction(source) {
+    var node = source;
+    while (node && node !== document) {
+      if (node.getAttribute && node.getAttribute('data-act')) {
+        return node;
       }
+      node = node.parentNode;
     }
-    if (!act) {
-      return;
-    }
+    return null;
+  }
 
-    var key = target.getAttribute('data-key');
-    var item = findItem(key);
+  /**
+   * 先 HEAD 探测再交给浏览器下载。
+   * 直接 <a href> 的问题是：版本失效时服务端返回 404 JSON，浏览器会整页跳过去，
+   * 用户看到一段裸 JSON 还得手动退回。探测失败只弹提示，页面原地不动。
+   */
+  function probeAndDownload(url, key, name) {
+    if (!url) return;
+    fetch(url, { method: 'HEAD' })
+      .then(function (res) {
+        if (!res.ok) {
+          toast(
+            res.status === 404
+              ? '该版本已失效或已下架，刷新页面看看最新版本'
+              : '暂时无法下载（' + res.status + '），稍后再试',
+            'err'
+          );
+          return;
+        }
+        var a = document.createElement('a');
+        a.href = url;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        toast('已开始下载 ' + name);
+        if (key) {
+          markClicked(key);
+        }
+      })
+      .catch(function () {
+        toast('网络异常，没能开始下载', 'err');
+      });
+  }
 
-    if (act === 'versions' && item) {
-      openDrawer(item);
-    } else if (act === 'download') {
-      toast('已开始下载 ' + (item ? item.file_name : '文件'));
-      markClicked(key);
-    }
+  dom.grid.addEventListener('click', function (e) {
+    var el = closestAction(e.target);
+    if (!el || el.getAttribute('data-act') !== 'versions') return;
+    var item = findItem(el.getAttribute('data-key'));
+    if (item) openDrawer(item);
   });
 
   document.addEventListener('click', function (e) {
-    var target = e.target;
-    while (target && !target.getAttribute) {
-      target = target.parentNode;
-    }
-    if (target && target.getAttribute && target.getAttribute('data-act') === 'close-drawer') {
+    var el = closestAction(e.target);
+    if (!el) return;
+    var act = el.getAttribute('data-act');
+
+    if (act === 'close-drawer') {
       closeDrawer();
+      return;
+    }
+    if (act === 'download') {
+      e.preventDefault();
+      var key = el.getAttribute('data-key');
+      var item = findItem(key);
+      var name = el.getAttribute('data-file') || (item ? item.file_name : '文件');
+      probeAndDownload(el.getAttribute('href'), key, name);
     }
   });
 

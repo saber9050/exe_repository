@@ -119,6 +119,7 @@ function toItems(manifest) {
           version: v.version,
           created_at: v.publishedAt || null,
           changelog: v.changelog || '',
+          file_name: fileNameOf(v).name,
           download_url: downloadUrl(manifest.code, v.version),
           is_latest: v.version === latest.version,
         })),
