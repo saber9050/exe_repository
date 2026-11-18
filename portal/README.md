@@ -15,11 +15,13 @@ portal/
 │   ├── src/catalog.js  制品目录：拉包、识别平台与架构、组装目录项
 │   ├── src/gitea.js    Gitea API 封装（列包、取文件、带 Range 转发字节）
 │   └── .env.example    配置模板
-└── web/             前端静态资源（无构建）
-    ├── index.html     页面骨架
-    ├── app.js         全部交互逻辑
-    ├── styles.css     样式
-    └── favicon.svg
+├── web/             前端静态资源（无构建）
+│   ├── index.html     页面骨架
+│   ├── app.js         全部交互逻辑
+│   ├── styles.css     样式
+│   └── favicon.svg
+├── Dockerfile        镜像定义（上下文是 portal/，要同时带上 server 和 web）
+└── .dockerignore     构建时排除 node_modules / .env
 ```
 
 ## 环境要求
@@ -75,6 +77,92 @@ docker exec -u git gitea gitea admin user generate-access-token \
 ```
 
 真实令牌只写进 `.env`（已在 `.gitignore` 中）。`.env.example` 会进版本库，保持空值。
+
+## Docker 部署（四步）
+
+镜像里**不带任何配置**，所有参数都在启动命令里用 `-e` 注入。传完镜像后，服务器上不需要任何
+配置文件，也不依赖本地环境。
+
+前置：服务器装好 docker（20.10+），安全组放行 8888。
+
+**本地（WSL，在 `portal/` 目录下）**
+
+```bash
+# 1. 构建
+docker build -t dep-portal:latest .
+
+# 2. 打包
+docker save dep-portal:latest | gzip -9 > dep-portal.tar.gz
+```
+
+**服务器（`dep-portal.tar.gz` 放上去之后）**
+
+```bash
+# 3. 加载包
+gunzip -c dep-portal.tar.gz | docker load
+
+# 4. 启动（先删旧容器，再带参数重建）
+docker rm -f dep-portal 2>/dev/null
+docker run -d \
+  --name dep-portal \
+  --restart unless-stopped \
+  -p 8888:8787 \
+  --add-host host.docker.internal:host-gateway \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  -e GITEA_BASE_URL=http://47.103.196.145:3000 \
+  -e GITEA_OWNER=zxp \
+  -e GITEA_TOKEN=<read:package + read:repository 的令牌> \
+  dep-portal:latest
+```
+
+四步跑完，打开 `http://47.103.196.145:8888`。
+
+### 参数说明
+
+| 参数 | 不写时的默认值 | 说明 |
+| --- | --- | --- |
+| `-e GITEA_TOKEN` | 空 | **必须给**，空的话页面能开但列表永远是空的 |
+| `-e GITEA_BASE_URL` | `http://47.103.196.145:3000` | Gitea 地址 |
+| `-e GITEA_OWNER` | `zxp` | 仓库 owner |
+| `-e GITEA_REPO` | `my-dependency` | 一般不用写 |
+| `-e GITEA_DEPS_DIR` | `deps` | 一般不用写 |
+| `-e GITEA_BRANCH` | `main` | 一般不用写 |
+| `-e PORT` | `8787` | **别改**，改了 `-p 8888:8787` 就对不上 |
+
+端口、重启策略、日志上限都写在启动命令里，健康检查写在镜像里，没有任何外部文件。
+
+### 改参数 / 更新版本
+
+改哪一行就重跑第 4 步。`docker rm -f` 已经把旧容器删了，新容器一定带新参数，
+不存在「改了没生效」的情况。只换端口就改 `-p 8888:8787` 的左边。
+
+### 令牌别留在命令历史里
+
+```bash
+read -rsp 'GITEA_TOKEN: ' GITEA_TOKEN; echo
+export GITEA_TOKEN
+docker run -d ... -e GITEA_TOKEN ... dep-portal:latest    # 只写变量名、不带 =value
+```
+
+必须 `export`：`-e 变量名` 这种写法是 docker 从自己的进程环境里取值，只 `read` 不 `export`
+会注入一个空值，症状和「没配置」一样。
+
+`-e` 的代价是 `docker inspect dep-portal` 里能看到明文，这个没法避开。
+
+### 服务器常用命令
+
+```bash
+docker logs -f --tail=100 dep-portal     # 日志
+docker restart dep-portal                # 重启
+docker rm -f dep-portal                  # 停止并删除容器
+docker ps --filter name=dep-portal       # 状态（含 healthy）
+docker exec dep-portal ls /app/web       # 看前端有没有打进镜像
+```
+
+### 回滚
+
+打包时顺手留一份归档 `cp dep-portal.tar.gz dep-portal-20261118.tar.gz`，
+回滚就 `gunzip -c 那份 | docker load`，再跑第 4 步。
 
 ## 制品怎么放
 
@@ -180,3 +268,30 @@ Node 版本太低，`nvm use 22.22.2` 再跑。
 **Windows 7 上打开空白页**
 先按 F12 看 Console 有没有语法错误。如果是 `Unexpected token` 之类，
 说明新代码里混进了 ES2018+ 语法（可选链 `?.`、空值合并 `??` 最常见），改回兼容写法。
+
+**Docker：第 4 步报找不到 `dep-portal:latest`**
+第 3 步没成功，或者构建机用了别的 tag。服务器上 `docker images dep-portal` 确认镜像在不在。
+
+**Docker：启动报 `port is already allocated`**
+宿主机 8888 被占了。`ss -lntp | grep 8888` 看是谁，改启动命令里 `-p 8888:8787` 的左边，
+安全组同步放行，再跑第 4 步。
+
+**Docker：容器 healthy，但页面 404**
+前端没进镜像。`docker exec dep-portal ls /app/web` 看一眼——空的就是 `.dockerignore`
+把 `web/` 排掉了，或者 Dockerfile 里的 `COPY web ./web` 被改坏。
+
+**Docker：页面能打开，制品列表空**
+参数没注入进去或注入错了。先看容器里实际拿到什么：
+
+```bash
+docker inspect dep-portal --format '{{json .Config.Env}}' | tr ',' '\n' | grep GITEA
+docker exec dep-portal sh -c 'wget -qO- http://127.0.0.1:8787/healthz'
+```
+
+`authenticated` 为 `false` → `-e GITEA_TOKEN` 没给或给了空值；owner 写错 → 日志里会有 `Gitea 404`。
+Gitea 就在同一台宿主机上、且 3000 没对公网开放时，`-e GITEA_BASE_URL=http://host.docker.internal:3000`
+（启动命令里已经加了 `--add-host host.docker.internal:host-gateway`）。
+
+**Docker：本地构建卡在 `npm ci`**
+`package-lock.json` 里的 `resolved` 已经指向 `registry.npmmirror.com`，正常几十秒装完。
+换过源的话，锁文件里的地址不会自动跟着变，本地 `rm package-lock.json && npm install` 重新生成再提交。

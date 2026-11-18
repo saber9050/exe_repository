@@ -1,0 +1,9 @@
+# 强制 LF：Windows 上 core.autocrlf=true 会把 Dockerfile / yml 检出成 CRLF，
+# 带 \r 的 RUN 行在容器里会解析成奇怪的东西（经典报错：/bin/sh: not found）
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.exe binary

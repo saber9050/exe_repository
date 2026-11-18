@@ -1,0 +1,17 @@
+# 构建上下文只保留镜像真正需要的东西：server/package*.json、server/src、web
+**/node_modules
+**/.git
+**/.idea
+**/*.log
+**/.data
+**/dist
+
+# 真实令牌在 .env 里，绝不能进镜像
+**/.env
+**/.env.local
+
+# 用不到的文件
+README.md
+Dockerfile
+.dockerignore
+*.tar.gz
