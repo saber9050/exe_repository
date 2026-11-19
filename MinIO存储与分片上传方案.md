@@ -169,6 +169,30 @@ manifest 不需要为此多存一个字段：
 
 真实文件名在 manifest 的 `name` 字段，通过 `Content-Disposition` 还原，用户侧无感。
 
+### 4.5 桶初始化
+
+服务启动时 `ensureBucket()` 做三件事，全部幂等：
+
+| 步骤 | 行为 | 失败处理 |
+| --- | --- | --- |
+| 1. `HeadBucket` | 桶不存在且 `MINIO_AUTO_CREATE_BUCKET=true` → `CreateBucket` | 关闭自动创建时抛 `BucketNotFound`，日志提示手工建桶 |
+| 2. 公开策略检测 | 读 bucket policy，发现允许匿名 `s3:GetObject` 就告警 | 只告警，不擅自改别人的策略 |
+| 3. 生命周期规则 | 配 `AbortIncompleteMultipartUpload: 1 天` | 版本不支持或权限不足时跳过，靠服务端 TTL 兜底 |
+
+**建桶时不带任何 ACL / Policy**，S3 与 MinIO 的新桶默认就是私有。
+
+### 4.6 私有桶为什么不影响下载
+
+私有桶限制的是**匿名访问**，不是**带凭据的访问**。两条下载链路都是 S3 签名请求：
+
+```
+管理页 → GET /client/deps/{code}/versions/{v}/download → Hub GetObject（manage 凭据）
+下载页 → 同上 → portal GetObject（只读凭据）
+```
+
+浏览器只会看到服务端地址，看不到 `minio:9000/deps/...` 这种直链。
+反过来，桶**必须**私有：一旦开了匿名读，知道对象 key 就能绕过启用状态、版本判定和审计直接下载。
+
 ---
 
 ## 5 元数据
@@ -293,12 +317,31 @@ function planParts(size, { minPart = MIN_PART, maxParts = MAX_PARTS, requested =
 
 刷新页面、换浏览器都不影响：只要 `uploadId` 还在，就能接着传。
 
+这两个地方都会让「续传」名存实亡，实现时必须盯住：
+
+| 坑 | 表现 | 正确做法 |
+| --- | --- | --- |
+| 会话前缀查错 | 会话写在 `meta/uploads/`，却去扫 `uploads/`；永远查不到进行中的会话，每次「继续」都新建一个 multipart | 由 `driver.meta.list(prefix)` 统一拼前缀，上层只认逻辑前缀 `uploads/` |
+| 用 abort 做暂停 | 中断正在传的分片，而 S3 里**半片无效**；暂停时 3 个并发都没传完就等于全废，继续后从 0 开始 | **软暂停**：只停止调度新分片，等在传的几片写完再进入 paused |
+
+软暂停的实现要点：
+
+- `shouldPause()` 在 worker 循环开头检查，命中就抛 `PausedError`（自定义，不是 `AbortError`）。
+- 用 `Promise.allSettled` 而不是 `all`：一个 worker 抛了，另外两个还在传当前这片，
+  必须等它们落地，否则暂停前那几片白传。
+- 前端按 `PausedError` 进 `paused` 态，不按 `AbortError`；后者只用于「取消」。
+
 ### 6.7 过期清理
 
 两道保险：
 
 1. **Hub 侧**：会话 `expiresAt`（默认 24h），查会话/列会话时惰性 Abort 并清掉。
-2. **MinIO 侧**：桶生命周期规则，兜住 Hub 重启/崩溃留下的孤儿分片：
+2. **MinIO 侧**：桶生命周期规则，兜住 Hub 重启/崩溃留下的孤儿分片。
+
+> **版本限制**：`AbortIncompleteMultipartUpload` 是较新版本才支持的规则。
+> 实测 `RELEASE.2022-01-04` 会直接 400 `InvalidRequest`（同一份规则里的
+> `Expiration` 却能通过），此时服务会跳过配置并打日志，清理退化为「靠 TTL +
+> 查询触发」。要存储侧自动回收，升级 MinIO 即可，代码不用改。
 
 ```json
 {
@@ -428,6 +471,8 @@ lib/audit.js            审计：通过 driver.meta 读写，不关心后端
 | 10 | SDK 的 `requestChecksumCalculation` 关掉 | 新版默认加 CRC32 头，部分 MinIO 版本直接 400 |
 | 11 | `forcePathStyle: true` | 否则拼出 `bucket.127.0.0.1` 这种解析不了的域名 |
 | 12 | `listKeys` 返回**逻辑 key**（去掉 `MINIO_PREFIX`） | 否则上层再拼一次前缀变 `prefix/prefix/...`，manifest 目录 slice 错位 |
+| 13 | 区分 `NoSuchBucket` 与 `NoSuchKey` | 都翻成「对象不存在」时，桶没建会被误报成「制品文件不存在」，排查方向全错 |
+| 14 | 老版本 MinIO 的 `PutBucketLifecycle*` 要求 `Content-MD5` | SDK v3 不再自动计算，会 400 `MissingContentMD5`；需命令级 middleware 补头 |
 
 ### 9.4 前端
 
@@ -435,6 +480,24 @@ lib/audit.js            审计：通过 driver.meta 读写，不关心后端
   旧的 `crypto.subtle` 实现要把整个文件读进内存，2 GiB 必 OOM。
 - 分片上传器：3 并发、5xx 重试 3 次（指数退避）、校验失败重传同号、`localStorage` 记 `uploadId`。
 - 小文件（< `DEP_CHUNKED_THRESHOLD`，默认 32 MiB）走单请求，省两次往返。
+- **选完文件就开始算 sha256**（后台跑），用户填版本号、写更新说明的十几秒里，
+  几 GB 的摘要已经算完，点上传能直接进传输。
+
+#### 进度必须连续，否则大文件看起来像卡死
+
+三个必须同时成立：
+
+| 项 | 做法 | 不这么做的后果 |
+| --- | --- | --- |
+| 片内进度 | 用 **XHR** 的 `upload.onprogress`（fetch 没有上传进度事件），把每个在传分片的「已发送字节」聚合到总进度 | 8 MiB 一片 + 3 并发，进度一次跳 1~3%，慢速网络下几秒不动 |
+| 字节数可见 | 进度条下方显示「已传 6.0 MB / 34.0 MB」 | 整数百分比在 2 GiB 上是 20 MB 一格，慢速时半分钟不动 |
+| 速率 + 剩余 | 最近 3 秒滑动窗口算瞬时速率，再做指数平滑（新值占 3 成）；剩余时间由平滑速率推 | 用总平均会让速度「只降不升」；不平滑则剩余时间一秒一个样 |
+
+实现细节：
+
+- 上报节流 100 ms。XHR 的 progress 触发很密，每帧 setState 会把主线程拖住。
+- 重试时把该分片计数清零并允许回退。用 `max` 兜底会让进度卡在旧值上一整个分片的时长。
+- 百分比封顶 99，最后 1% 留给服务端合并与登记，文案切换成「服务端合并登记中…」。
 
 ---
 
@@ -470,6 +533,8 @@ MINIO_SECRET_KEY=
 MINIO_BUCKET=dep-artifacts
 MINIO_REGION=us-east-1
 MINIO_PREFIX=
+MINIO_AUTO_CREATE_BUCKET=true      # 桶不存在时自动建（默认私有）
+MINIO_ABORT_INCOMPLETE_DAYS=1      # 中断分片多久后清理；0 = 不配该规则
 
 # 分片
 DEP_PART_SIZE=8388608         # 8 MiB
