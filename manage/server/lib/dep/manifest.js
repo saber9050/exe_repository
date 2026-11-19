@@ -2,7 +2,7 @@
  * 依赖资产模型。
  *
  * 一个资产 = 一个 manifest.json，状态机、版本表、校验和全在里面。
- * Gitea 只存字节，不做任何判定。
+ * 对象存储只存字节，不做任何判定。
  */
 import { HttpError } from '../http-error.js'
 
@@ -71,13 +71,14 @@ export const assertArch = (input) => pickList(input, ARCH_LIST, 'arch')
 /**
  * 制品在存储里的文件名。
  *
- * 两个约束：
- *   1. Gitea 的 file_name 只允许 [a-zA-Z0-9.+-_]，中文名会整段丢失
- *   2. 更关键的是：前置链路（WAF / 下载防护）会**直接重置**这些扩展名的上传请求
+ * 对象存储本身不限扩展名，仍然压平的原因有两条：
+ *   1. 前置链路（WAF / 下载防护）会**直接重置**这些扩展名的上传请求
  *      —— .exe .msi .dll .cab .zip .rar .iso .dmg .apk .gz .tar .txt .bin
  *      实测表现是连接被 RST、Empty reply from server，字节都发完了也没响应。
+ *      分片上传已经绕开了它（请求体里没有文件名），但预签名直连场景仍会命中。
+ *   2. 直连对象存储时，带 .exe 的 key 会让网关/浏览器的下载策略行为不可控。
  *
- * 所以存储名统一压成 .dat（实测可通过），原始文件名另外存在 manifest 的 name 字段，
+ * 所以存储名统一压成 .dat，原始文件名另外存在 manifest 的 name 字段，
  * 下载时用 Content-Disposition 的 RFC 5987 形式还原。
  */
 export function toStorageFileName(originalName, index = 1) {

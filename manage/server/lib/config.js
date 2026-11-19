@@ -38,24 +38,20 @@ const num = (v, fallback) => {
   return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
+const bool = (v, fallback) => {
+  if (v === undefined || v === '') return fallback
+  return String(v).toLowerCase() !== 'false'
+}
+
+const GiB = 1024 * 1024 * 1024
+const MiB = 1024 * 1024
+
 export const config = {
   // 下载端 portal 默认 8787，管理端错开
   port: num(process.env.PORT, 8788),
   distDir: path.resolve(ROOT, '../web/dist'),
 
-  // Gitea 作为唯一制品存储：资产清单、制品、审计都落在同一个仓库里
-  giteaUrl: (process.env.GITEA_URL || 'http://47.103.196.145:3000').replace(/\/+$/, ''),
-  giteaToken: process.env.GITEA_TOKEN || '',
-  owner: process.env.GITEA_OWNER || '',
-  repo: process.env.GITEA_REPO || 'my-dependency',
-  branch: process.env.GITEA_BRANCH || 'main',
-
-  // 启动时仓库不存在就自动建（含初始提交与分支）。关掉就得手工建仓并初始化。
-  autoCreateRepo: (process.env.GITEA_AUTO_CREATE_REPO || 'true').toLowerCase() !== 'false',
-  // 自动建出来的仓库是否私有。默认私有，避免清单被匿名浏览。
-  repoPrivate: (process.env.GITEA_REPO_PRIVATE || 'true').toLowerCase() !== 'false',
-
-  // 管理端账号（平台账号，不是 Gitea 账号；Gitea 令牌只存在于服务端）
+  // 管理端账号（平台账号，与对象存储的 key 无关；S3 凭据只存在于服务端）
   adminUser: process.env.ADMIN_USER || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || 'dsh@2026',
   adminName: process.env.ADMIN_NAME || '平台管理员',
@@ -63,36 +59,61 @@ export const config = {
   sessionTtlSeconds: num(process.env.SESSION_TTL_SECONDS, 12 * 3600),
 
   auditLimit: num(process.env.AUDIT_LIMIT, 200),
-  // 目录索引的缓存时间。写入会由本进程立即失效，这里的 TTL 只影响「别人直接改仓库」
-  // 何时被看到；链路访问 Gitea 一次约 2 秒，别设太小，否则每个请求都在重新扫。
+  // 目录索引的缓存时间。写入会由本进程立即失效，这里的 TTL 只影响「别人直接改存储」
+  // 何时被看到；别设太小，否则每个请求都在重新扫 manifest。
   cacheTtlMs: num(process.env.CACHE_TTL_MS, 30000),
-  requestTimeoutMs: num(process.env.GITEA_TIMEOUT_MS, 20000),
+
+  /* ---------------- 对象存储 ---------------- */
+
+  minio: {
+    endpoint: (process.env.MINIO_ENDPOINT || '127.0.0.1').replace(/^https?:\/\//, '').replace(/\/+$/, ''),
+    port: num(process.env.MINIO_PORT, 9000),
+    useSsl: bool(process.env.MINIO_USE_SSL, false),
+    accessKey: process.env.MINIO_ACCESS_KEY || '',
+    secretKey: process.env.MINIO_SECRET_KEY || '',
+    bucket: process.env.MINIO_BUCKET || 'dep-artifacts',
+    region: process.env.MINIO_REGION || 'us-east-1',
+    // 桶内额外前缀，留空表示 deps/ 与 meta/ 直接在桶根
+    prefix: (process.env.MINIO_PREFIX || '').replace(/^\/+|\/+$/g, ''),
+  },
 
   /* ---------------- 依赖库 ---------------- */
 
-  // 只走 Gitea：manifest 写仓库，制品写 generic registry。
-  // 本地不落任何状态（下载计数已移除）。
-  // 单文件上限，默认 2 GiB
-  depMaxFileBytes: num(process.env.DEP_MAX_FILE_BYTES, 2 * 1024 * 1024 * 1024),
-  // manifest 在仓库里的目录
-  depGiteaDir: (process.env.DEP_GITEA_DIR || 'deps').replace(/^\/+|\/+$/g, ''),
+  // manifest 写 meta/ 前缀，制品写 deps/ 前缀；本地不落任何状态。
+  // 唯一硬上限是 10000 片 × partSize，所以放到 20 GiB 很安全。
+  depMaxFileBytes: num(process.env.DEP_MAX_FILE_BYTES, 20 * GiB),
+
+  /* ---------------- 分片上传 ---------------- */
+
+  // 单片大小。S3 下限 5 MiB，这里取 8 MiB 留余量；客户端可要求更大，服务端取 max。
+  depPartSize: num(process.env.DEP_PART_SIZE, 8 * MiB),
+  depMaxParts: num(process.env.DEP_MAX_PARTS, 10000),
+  // 会话有效期，过期后分片被 Abort
+  depUploadTtlHours: num(process.env.DEP_UPLOAD_TTL_HOURS, 24),
+  // chunk：逐片校验；full：完成后再全量复算；none：只校验大小
+  depVerifyMode: (() => {
+    const mode = String(process.env.DEP_VERIFY_MODE || 'chunk').toLowerCase()
+    return ['chunk', 'full', 'none'].includes(mode) ? mode : 'chunk'
+  })(),
+  // 小于此值前端走单请求直传，省两次往返
+  depChunkedThreshold: num(process.env.DEP_CHUNKED_THRESHOLD, 32 * MiB),
 }
 
 export function assertConfig() {
   const missing = []
-  if (!config.giteaToken) missing.push('GITEA_TOKEN')
-  if (!config.giteaUrl) missing.push('GITEA_URL')
-  if (!config.owner) missing.push('GITEA_OWNER')
-  if (!config.repo) missing.push('GITEA_REPO')
-  if (missing.length) {
-    throw new Error(
-      [
-        `缺少配置：${missing.join(', ')}`,
-        '在 Gitea「设置 → 应用 → 生成令牌」创建令牌，至少勾选：',
-        '  repository: Read and Write  （写 manifest、读资产清单）',
-        '  package:    Read and Write  （依赖制品走 generic registry）',
-        `填进 server/.env 后重启。当前目标：${config.owner}/${config.repo}@${config.branch}`,
-      ].join('\n'),
-    )
-  }
+  if (!config.minio.accessKey) missing.push('MINIO_ACCESS_KEY')
+  if (!config.minio.secretKey) missing.push('MINIO_SECRET_KEY')
+  if (!config.minio.bucket) missing.push('MINIO_BUCKET')
+  if (!missing.length) return
+
+  throw new Error(
+    [
+      `缺少配置：${missing.join(', ')}`,
+      `需要指向一个可用的 MinIO（${config.minio.endpoint}:${config.minio.port}）。`,
+      '在 MinIO 控制台「Access Keys」建一对密钥，桶上按前缀授权后填进 server/.env：',
+      '  MINIO_ENDPOINT=127.0.0.1   MINIO_PORT=9000   MINIO_USE_SSL=false',
+      '  MINIO_ACCESS_KEY=...       MINIO_SECRET_KEY=...',
+      '  MINIO_BUCKET=dep-artifacts',
+    ].join('\n'),
+  )
 }

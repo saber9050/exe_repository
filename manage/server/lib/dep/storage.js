@@ -1,63 +1,48 @@
 /**
- * 依赖库存储驱动：只有 Gitea，没有本地落盘。
+ * 依赖库存储驱动：MinIO（S3 兼容对象存储）。
  *
- * 两条通道刻意分开：
- *   manifest -> 仓库 contents API（几 KB 的 JSON，人可读、可 diff、可回滚）
- *   制品字节 -> generic package registry（裸字节 PUT，不 base64、不进 git 历史、不落临时盘）
+ * 三条不变量：
+ *   1. 存储只存字节与清单，可见性/版本状态一律由上层判定
+ *   2. 对象 key 与 manifest 的 files[].path 逐字符一致
+ *   3. manifest 是唯一事实源，制品路径从 manifest 取，不由存储层推断
  *
- * 为什么不走仓库 contents 存制品：要 base64（体积 +34%），且受
- * [repository.upload] FILE_MAX_SIZE（默认 50 MB）限制，几百 MB 的 exe 直接被拒。
+ * 前缀约定见方案 §5：制品在 deps/，清单与会话在 meta/。
  */
-import { Readable } from 'node:stream'
 import { HttpError } from '../http-error.js'
-
-const enc = (s) => String(s).split('/').map(encodeURIComponent).join('/')
 
 const notFound = (msg = '制品文件不存在') => new HttpError(404, msg)
 
-export function createDepGiteaDriver({ gitea, cfg }) {
-  const { giteaUrl, giteaToken, owner, repo, branch, depsDir } = cfg
-  const base = giteaUrl.replace(/\/+$/, '')
-  const repoApi = `${base}/api/v1/repos/${enc(owner)}/${enc(repo)}`
-  const auth = { Authorization: `token ${giteaToken}` }
-  const manifestPath = (code) => `${depsDir}/${code}/manifest.json`
-  const packageUrl = (code, version, fileName) =>
-    `${base}/api/packages/${enc(owner)}/generic/${enc(code)}/${enc(version)}/${enc(fileName)}`
+/** 存储层异常统一收口：不存在给 404，其余给 502 */
+function wrapStorageError(err, action = '存储操作') {
+  if (err instanceof HttpError) return err
+  if (err?.name === 'ObjectNotFound') return notFound()
+  return new HttpError(502, `${action}失败：存储不可用，请稍后重试`, { code: 'STORAGE_UNAVAILABLE' })
+}
 
-  const LONG_TIMEOUT_MS = 6 * 3600 * 1000
+export function createDepDriver({ store }) {
+  const MANIFEST_ROOT = 'meta/deps'
+  const HISTORY_KEEP = 20
 
-  async function tree(shaOrRef) {
-    let res
-    try {
-      res = await fetch(`${repoApi}/git/trees/${encodeURIComponent(shaOrRef)}`, {
-        headers: auth,
-        signal: AbortSignal.timeout(20000),
-      })
-    } catch {
-      throw new HttpError(502, 'Gitea 不可达，检查 GITEA_URL 与网络')
-    }
-    if (res.status === 404) return null
-    if (res.status === 401 || res.status === 403) {
-      throw new HttpError(502, '制品库鉴权失败：令牌缺少 read:repository 权限，或仓库不存在')
-    }
-    if (!res.ok) throw new HttpError(502, `读取仓库树失败（${res.status}）`)
-    return res.json()
-  }
+  const manifestKey = (code) => `${MANIFEST_ROOT}/${code}/manifest.json`
+  const historyPrefix = (code) => `${MANIFEST_ROOT}/${code}/history/`
 
   return {
-    name: 'gitea',
+    name: 'minio',
 
     async listManifests() {
-      const root = await tree(branch)
-      if (!root) return []
-      const dir = (root.tree || []).find((e) => e.type === 'tree' && e.path === depsDir)
-      if (!dir) return []
-
-      const list = await tree(dir.sha)
-      const codes = (list?.tree || []).filter((e) => e.type === 'tree').map((e) => e.path)
+      let keys
+      try {
+        keys = await store.listKeys(`${MANIFEST_ROOT}/`)
+      } catch (err) {
+        throw wrapStorageError(err, '读取资产清单')
+      }
+      const targets = keys
+        .map((k) => k.key)
+        .filter((k) => k.endsWith('/manifest.json'))
+        .map((k) => k.slice(`${MANIFEST_ROOT}/`.length).replace(/\/manifest\.json$/, ''))
 
       const out = []
-      const queue = codes.slice()
+      const queue = targets.slice()
       const worker = async () => {
         while (queue.length) {
           const code = queue.shift()
@@ -74,107 +59,168 @@ export function createDepGiteaDriver({ gitea, cfg }) {
     },
 
     async readManifest(code) {
-      const file = await gitea.getFile(manifestPath(code))
-      if (!file) return null
       try {
-        return JSON.parse(file.content.toString('utf8'))
+        const { data } = await store.getJson(manifestKey(code))
+        return data || null
+      } catch (err) {
+        throw wrapStorageError(err, '读取 manifest')
+      }
+    },
+
+    /**
+     * 写 manifest。S3 没有 CAS，靠上层 withLock 串行 + 写前归档旧版兜底：
+     * 归档补上「可回滚」能力，最近 20 版留着，排查误操作够用。
+     */
+    async writeManifest(manifest) {
+      await this.archiveManifest(manifest.code)
+      const buffer = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+      try {
+        await store.putObject({
+          key: manifestKey(manifest.code),
+          body: buffer,
+          size: buffer.length,
+          contentType: 'application/json; charset=utf-8',
+        })
+      } catch (err) {
+        throw wrapStorageError(err, '写 manifest')
+      }
+    },
+
+    async archiveManifest(code) {
+      try {
+        const { data } = await store.getJson(manifestKey(code))
+        if (!data) return null
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        const key = `${historyPrefix(code)}${stamp}.json`
+        const buffer = Buffer.from(`${JSON.stringify(data, null, 2)}\n`, 'utf8')
+        await store.putObject({
+          key,
+          body: buffer,
+          size: buffer.length,
+          contentType: 'application/json; charset=utf-8',
+        })
+        // 只留最近 20 版；历史清理失败不影响主流程
+        const olds = (await store.listKeys(historyPrefix(code)))
+          .sort((a, b) => String(b.key).localeCompare(String(a.key)))
+          .slice(HISTORY_KEEP)
+        for (const item of olds) await store.deleteObject(item.key).catch(() => {})
+        return { key }
       } catch {
         return null
       }
     },
 
-    async writeManifest(manifest) {
-      const filePath = manifestPath(manifest.code)
-      const buffer = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-      const existing = await gitea.getFile(filePath)
-      try {
-        await gitea.putFile(filePath, buffer, `chore(dep): 更新 ${manifest.code}`, existing?.sha)
-      } catch (err) {
-        if (err?.status === 401 || err?.status === 403) {
-          throw new HttpError(502, '写 manifest 失败：令牌缺少 write:repository 权限')
-        }
-        if (err?.status === 404) {
-          throw new HttpError(502, `仓库 ${owner}/${repo} 不存在或分支 ${branch} 不存在`)
-        }
-        throw err
-      }
-    },
-
     async deleteManifest(code) {
-      await gitea.deleteFile(manifestPath(code), `chore(dep): 删除 ${code}`)
+      await store.deleteObject(manifestKey(code)).catch(() => {})
+      // 历史一并清掉：删资产时留一堆孤儿 JSON 没有意义
+      try {
+        const olds = await store.listKeys(historyPrefix(code))
+        for (const item of olds) await store.deleteObject(item.key).catch(() => {})
+      } catch {
+        /* 忽略 */
+      }
     },
 
-    async putArtifact({ code, version, fileName, stream, size }) {
-      let res
+    async statArtifact(relPath) {
       try {
-        res = await fetch(packageUrl(code, version, fileName), {
-          method: 'PUT',
-          headers: {
-            ...auth,
-            'Content-Type': 'application/octet-stream',
-            ...(size ? { 'Content-Length': String(size) } : {}),
-          },
-          body: Readable.toWeb(stream),
-          duplex: 'half',
-          signal: AbortSignal.timeout(LONG_TIMEOUT_MS),
+        return await store.statObject(relPath)
+      } catch (err) {
+        throw wrapStorageError(err, '读取对象属性')
+      }
+    },
+
+    async putArtifact({ relPath, stream, size }) {
+      try {
+        const { etag } = await store.putObject({
+          key: relPath,
+          body: stream,
+          size,
+          contentType: 'application/octet-stream',
         })
-      } catch {
-        throw new HttpError(502, '上传中断：Gitea 不可达或连接被重置')
+        return { path: relPath, size: size || 0, etag }
+      } catch (err) {
+        throw wrapStorageError(err, '上传制品')
       }
-      if (!res.ok) {
-        const text = await res.text().catch(() => '')
-        if (res.status === 409) throw new HttpError(409, '该版本下已存在同名文件，版本不可覆盖')
-        if (res.status === 400) throw new HttpError(422, 'Gitea 拒绝了文件名或版本号格式')
-        if (res.status === 401 || res.status === 403) {
-          throw new HttpError(502, '制品库鉴权失败：令牌缺少 write:package 权限')
-        }
-        if (res.status === 413) throw new HttpError(413, '超过制品库单文件上限')
-        throw new HttpError(502, `Gitea 上传失败（${res.status}）${text ? `：${text.slice(0, 160)}` : ''}`)
-      }
-      return { path: `${code}/${version}/${fileName}`, size: size || 0 }
     },
 
     async deleteArtifact(relPath) {
-      const [code, version, fileName] = relPath.split('/')
-      if (!code || !version || !fileName) return
-      await fetch(packageUrl(code, version, fileName), {
-        method: 'DELETE',
-        headers: auth,
-        signal: AbortSignal.timeout(30000),
-      }).catch(() => {})
+      await store.deleteObject(relPath).catch(() => {})
     },
 
     async fetchArtifact(relPath, { range } = {}) {
-      const [code, version, fileName] = relPath.split('/')
-      if (!code || !version || !fileName) throw notFound('制品路径不合法')
-
-      let res
       try {
-        res = await fetch(packageUrl(code, version, fileName), {
-          headers: { ...auth, ...(range ? { Range: range } : {}) },
-          signal: AbortSignal.timeout(LONG_TIMEOUT_MS),
-        })
-      } catch {
-        throw new HttpError(502, '取制品失败：Gitea 不可达')
-      }
-      if (!res.ok) {
-        if (res.status === 404) throw notFound()
-        if (res.status === 401 || res.status === 403) {
-          throw new HttpError(502, '读制品失败：令牌缺少 read:package 权限')
-        }
-        throw new HttpError(502, `取制品失败（${res.status}）`)
-      }
-      const headers = {}
-      for (const key of ['content-length', 'content-range', 'accept-ranges', 'content-type']) {
-        const value = res.headers.get(key)
-        if (value) headers[key] = value
-      }
-      if (!headers['content-type']) headers['content-type'] = 'application/octet-stream'
-      return {
-        status: res.status,
-        headers,
-        body: res.body ? Readable.fromWeb(res.body) : Readable.from([]),
+        return await store.getObject({ key: relPath, range })
+      } catch (err) {
+        throw wrapStorageError(err, '读取制品')
       }
     },
+
+    /* ------------------------------ 分片 ------------------------------ */
+
+    async createUpload({ relPath, contentType = 'application/octet-stream' }) {
+      try {
+        const { uploadId } = await store.createMultipart({ key: relPath, contentType })
+        if (!uploadId) throw new Error('未返回 uploadId')
+        return { uploadId }
+      } catch (err) {
+        throw wrapStorageError(err, '创建分片上传')
+      }
+    },
+
+    async uploadPart({ relPath, uploadId, partNumber, stream, size }) {
+      try {
+        return await store.uploadPart({
+          key: relPath,
+          uploadId,
+          partNumber,
+          body: stream,
+          size,
+        })
+      } catch (err) {
+        throw wrapStorageError(err, '写入分片')
+      }
+    },
+
+    async listParts({ relPath, uploadId }) {
+      try {
+        return await store.listParts({ key: relPath, uploadId })
+      } catch (err) {
+        throw wrapStorageError(err, '读取分片列表')
+      }
+    },
+
+    async completeUpload({ relPath, uploadId, parts }) {
+      try {
+        return await store.completeMultipart({ key: relPath, uploadId, parts })
+      } catch (err) {
+        throw wrapStorageError(err, '合并分片')
+      }
+    },
+
+    async abortUpload({ relPath, uploadId }) {
+      try {
+        await store.abortMultipart({ key: relPath, uploadId })
+      } catch {
+        /* 已完成的会话 Abort 会 404，忽略 */
+      }
+      return true
+    },
+
+    /** 审计等元数据读写 */
+    meta: {
+      name: 'minio',
+      async getJson(key) {
+        return store.getJson(`meta/${key}`)
+      },
+      async putJson(key, data) {
+        return store.putJson(`meta/${key}`, data)
+      },
+      async deleteKey(key) {
+        return store.deleteObject(`meta/${key}`)
+      },
+    },
+
+    /** 供路由按前缀列上传会话 */
+    store,
   }
 }

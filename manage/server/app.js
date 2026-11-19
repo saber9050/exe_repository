@@ -2,13 +2,14 @@
  * 依赖库管理端 · express 应用
  *
  * 从 dsh 插件市场里分离出来的独立服务：只保留依赖库这一块，插件库的路由、
- * 仓储、包上传全部不在这个进程里。制品仍然落在 Gitea generic registry，
- * 本地只保存下载计数。
+ * 仓储、包上传全部不在这个进程里。
+ *
+ * 制品、清单、审计都落在 MinIO 对象存储（S3 协议），本地不落任何状态。
  *
  * 分层：
- *   /server/auth/**   管理端登录（平台账号，不是 Gitea 账号）
- *   /server/audit     审计（依赖库的写操作，落 audit.json）
- *   /server/deps/**   管理端：登记、上传、启停、删除
+ *   /server/auth/**   管理端登录（平台账号，与对象存储的 key 无关）
+ *   /server/audit     审计（依赖库的写操作，落 meta/audit.json）
+ *   /server/deps/**   管理端：登记、分片上传、启停、删除
  *   /client/deps/**   客户端只读：目录、版本、下载
  */
 import fs from 'node:fs'
@@ -16,7 +17,8 @@ import path from 'node:path'
 import express from 'express'
 
 import { config } from './lib/config.js'
-import { createGitea, GiteaError } from './lib/gitea.js'
+import { createObjectStore } from './lib/storage/s3.js'
+import { createDepDriver } from './lib/dep/storage.js'
 import { AuditLog } from './lib/audit.js'
 import { HttpError } from './lib/http-error.js'
 import { login, requireAdmin } from './lib/auth.js'
@@ -57,9 +59,11 @@ function createIndexRenderer(indexHtmlPath) {
 export function createManageApp(options = {}) {
   const log = options.log || ((msg, err) => console.log(msg, err || ''))
 
-  const gitea = createGitea()
-  // 审计只有这一份：所有写操作都往同一个 audit.json 追加，由它串行化
-  const audit = new AuditLog({ gitea, limit: config.auditLimit, ttlMs: config.cacheTtlMs })
+  const objectStore = createObjectStore(config.minio)
+  const driver = createDepDriver({ store: objectStore })
+  // 审计只有这一份：所有写操作都往同一个 audit.json 追加，由它串行化。
+  // 存储后端通过 driver.meta 注入，切 MinIO 时这一层不动。
+  const audit = new AuditLog({ meta: driver.meta, limit: config.auditLimit, ttlMs: config.cacheTtlMs })
   const app = express()
 
   app.disable('x-powered-by')
@@ -124,7 +128,7 @@ export function createManageApp(options = {}) {
   /**
    * 管理端 /server/deps/**、客户端 /client/deps/** 都在这个路由模块里注册。
    */
-  const dep = mountDepRoutes(app, { config, gitea, requireAdmin, audit })
+  const dep = mountDepRoutes(app, { config, driver, requireAdmin, audit })
 
   /* ============================== 静态站点 ============================== */
 
@@ -166,41 +170,26 @@ export function createManageApp(options = {}) {
       res.status(err.status).json({ message: err.message, ...err.extra })
       return
     }
-    if (err instanceof GiteaError) {
-      const status = err.status === 404 ? 404 : 502
-      const message =
-        err.status === 401 || err.status === 403
-          ? '制品库鉴权失败，请检查服务端 GITEA_TOKEN'
-          : err.status === 0
-            ? err.message
-            : `制品库异常：${err.message}`
-      res.status(status).json({ message })
-      return
-    }
     log('[manage] 未捕获异常', err)
     res.status(500).json({ message: '服务异常，请稍后重试' })
   })
 
   /**
-   * 仓库准备与索引预热。
-   * 放后台跑：Gitea 慢或不可达时管理界面照样能打开，接口自己会返回 502。
+   * 存储准备与索引预热。
+   * 放后台跑：存储慢或不可达时管理界面照样能打开，接口自己会返回 502。
    */
   async function init() {
-    if (config.autoCreateRepo) {
-      try {
-        const result = await gitea.ensureRepo({ private: config.repoPrivate })
-        const action = result.created ? '已自动创建' : '已存在'
-        const branch = result.branchReady ? '' : `，但分支 ${config.branch} 不可用`
-        log(`[manage] 仓库 ${config.owner}/${config.repo} ${action}${branch}`)
-      } catch (err) {
-        log('[manage] 仓库检查失败（服务仍会启动，接口可能返回 502）', err.message)
-      }
+    try {
+      await objectStore.headBucket()
+      log(`[manage] 对象存储可用 bucket=${config.minio.bucket}（${config.minio.endpoint}:${config.minio.port}）`)
+    } catch (err) {
+      log('[manage] 对象存储探测失败（服务仍会启动，接口可能返回 502）', err.message)
     }
 
     try {
       await dep.store.ensureIndex({ force: true })
       const assets = await dep.store.list()
-      log(`[manage] 仓库连接正常，已加载 ${assets.length} 个依赖资产`)
+      log(`[manage] 存储连接正常（${driver.name}），已加载 ${assets.length} 个依赖资产`)
     } catch (err) {
       log('[manage] 无法读取依赖库清单', err.message)
     }
@@ -210,7 +199,8 @@ export function createManageApp(options = {}) {
     app,
     audit,
     dep,
-    gitea,
+    driver,
+    objectStore,
     init,
   }
 }

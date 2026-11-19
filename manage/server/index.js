@@ -29,7 +29,10 @@ const indexHtml = `${config.distDir}/index.html`
 const server = app.listen(config.port, '127.0.0.1', async () => {
   const local = `http://127.0.0.1:${config.port}`
   console.log(`[manage] 已启动 ${local}`)
-  console.log(`[manage] 制品库 ${manage.gitea.htmlUrl()}（${config.owner}/${config.repo}@${config.branch}）`)
+  console.log(
+    `[manage] 制品库 MinIO ${config.minio.endpoint}:${config.minio.port}/${config.minio.bucket}` +
+      `（分片 ${Math.round(config.depPartSize / 1024 / 1024)} MiB/片，上限 ${config.depMaxParts} 片）`,
+  )
   if (!fs.existsSync(indexHtml)) {
     console.log('[manage] 未发现 web/dist，开发期请用 npm run dev（Vite 会把 /client 与 /server 代理到这里）')
   }

@@ -196,78 +196,135 @@ export class DepStore {
   }
 
   /**
-   * 上传一个制品并登记为版本。
+   * 预检：资产存在 + 版本未占用。
    *
-   * 流式：不落内存；Gitea 驱动直接 pipe 到 fetch body。
-   * 版本不可变：同版本已存在直接 409，不提供覆盖入口。
+   * 刻意不持锁 —— 分片上传可能持续十几分钟，把全局写队列堵住会让所有
+   * 写操作排队（这正是迁移前的老毛病）。真正的判定在 commitVersion 里
+   * 持锁复查，这里是「早失败」而不是「最终裁决」。
+   */
+  async reserveVersion(code, version) {
+    const manifest = await this.getManifest(assertCode(code))
+    if (!manifest) throw new HttpError(404, '资产不存在，请先登记')
+    const ver = assertVersion(version)
+    if ((manifest.versions || []).some((v) => v.version === ver)) {
+      throw new HttpError(409, `版本 ${ver} 已存在，版本不可覆盖`, { code: 'VERSION_EXISTS' })
+    }
+    return { manifest, version: ver }
+  }
+
+  /**
+   * 单请求直传（兼容旧接口）：流式写入存储，再登记版本。
+   *
+   * 与旧实现的差别只有一处：上传阶段不再持锁，只有最后的登记进锁。
+   * 字节仍在管道里算 sha256，不落盘、不整体进内存。
    */
   async addVersion(code, { version, fileName, stream, expectedSha256, changelog, declaredSize, actor }) {
+    const { manifest, version: ver } = await this.reserveVersion(code, version)
+    if (!fileName || !String(fileName).trim()) throw new HttpError(422, '文件名必填')
+    if (declaredSize && declaredSize > this.maxFileBytes) {
+      throw new HttpError(413, `文件超过 ${formatBytes(this.maxFileBytes)} 上限`)
+    }
+
+    const storageName = toStorageFileName(fileName)
+    const relPath = `${manifest.code}/${ver}/${storageName}`
+    const hash = crypto.createHash('sha256')
+    let bytes = 0
+    const tap = new Transform({
+      transform(chunk, _enc, cb) {
+        hash.update(chunk)
+        bytes += chunk.length
+        if (bytes > this.maxFileBytes) {
+          cb(new Error('TOO_LARGE'))
+          return
+        }
+        cb(null, chunk)
+      },
+    })
+    /**
+     * 用 pipeline 而不是 pipe：客户端取消上传时 req 会直接销毁，
+     * 单纯 pipe 不会把这个中断传给 tap，于是存储客户端一直等一个永远
+     * 不结束的 body。pipeline 会把中断一路传下去，tap 立刻 error。
+     */
+    pipeline(stream, tap).catch(() => {})
+
+    let stored
+    try {
+      stored = await this.driver.putArtifact({ relPath, stream: tap, size: declaredSize })
+    } catch (err) {
+      tap.destroy()
+      if (err.message === 'TOO_LARGE') {
+        throw new HttpError(413, `文件超过 ${formatBytes(this.maxFileBytes)} 上限`)
+      }
+      throw err
+    }
+
+    if (!bytes) {
+      await this.driver.deleteArtifact(relPath).catch(() => {})
+      throw new HttpError(422, '文件为空')
+    }
+    if (bytes > this.maxFileBytes) {
+      await this.driver.deleteArtifact(relPath).catch(() => {})
+      throw new HttpError(413, `文件超过 ${formatBytes(this.maxFileBytes)} 上限`)
+    }
+
+    const sha256 = hash.digest('hex')
+    if (expectedSha256 && String(expectedSha256).toLowerCase() !== sha256) {
+      await this.driver.deleteArtifact(relPath).catch(() => {})
+      throw new HttpError(422, 'sha256 与期望值不一致，已回滚上传', {
+        code: 'CHECKSUM_MISMATCH',
+        expected: String(expectedSha256).toLowerCase(),
+        actual: sha256,
+      })
+    }
+
+    try {
+      return await this.commitVersion({
+        code: manifest.code,
+        version: ver,
+        fileName,
+        storageName,
+        relPath,
+        size: bytes,
+        sha256,
+        changelog,
+        actor,
+      })
+    } catch (err) {
+      // 两段写没有事务：登记失败必须删掉刚写入的字节，
+      // 否则会留下绕过「版本不可变」的孤儿制品
+      await this.driver.deleteArtifact(relPath).catch(() => {})
+      throw err
+    }
+  }
+
+  /**
+   * 登记版本。调用时字节已经在存储里（分片已合并，或单请求已写完）。
+   *
+   * 这是**唯一**持锁的写路径，也是「版本不可变」的最终防线：
+   * 预检与登记之间可能有人抢先上传了同版本，这里必须复查。
+   */
+  async commitVersion({
+    code,
+    version,
+    fileName,
+    storageName,
+    relPath,
+    size,
+    sha256,
+    changelog,
+    actor,
+    partCount,
+    partSize,
+  }) {
     return this.withLock(async () => {
       const manifest = await this.getManifest(assertCode(code), { force: true })
       if (!manifest) throw new HttpError(404, '资产不存在，请先登记')
       const ver = assertVersion(version)
       if ((manifest.versions || []).some((v) => v.version === ver)) {
-        throw new HttpError(409, `版本 ${ver} 已存在，版本不可覆盖`)
-      }
-      if (!fileName || !String(fileName).trim()) throw new HttpError(422, '文件名必填')
-      if (declaredSize && declaredSize > this.maxFileBytes) {
-        throw new HttpError(413, `文件超过 ${formatBytes(this.maxFileBytes)} 上限`)
+        throw new HttpError(409, `版本 ${ver} 已存在，版本不可覆盖`, { code: 'VERSION_EXISTS' })
       }
 
-      const storageName = toStorageFileName(fileName)
-      const hash = crypto.createHash('sha256')
-      let bytes = 0
-      const tap = new Transform({
-        transform(chunk, _enc, cb) {
-          hash.update(chunk)
-          bytes += chunk.length
-          if (bytes > this.maxFileBytes) {
-            cb(new Error('TOO_LARGE'))
-            return
-          }
-          cb(null, chunk)
-        },
-      })
-      /**
-       * 用 pipeline 而不是 pipe：客户端取消上传时 req 会直接销毁，
-       * 单纯 pipe 不会把这个中断传给 tap，于是 fetch 一直等一个永远不结束的 body，
-       * 写锁也就永远不释放——后面所有上传都会卡在队列里（表现为「一直上传中，进度不动」）。
-       * pipeline 会把中断一路传下去，tap 立刻 error，fetch 随之失败，锁正常归还。
-       */
-      pipeline(stream, tap).catch(() => {})
-
-      let stored
-      try {
-        stored = await this.driver.putArtifact({
-          code: manifest.code,
-          version: ver,
-          fileName: storageName,
-          stream: tap,
-          size: declaredSize,
-        })
-      } catch (err) {
-        tap.destroy()
-        if (err.message === 'TOO_LARGE') {
-          throw new HttpError(413, `文件超过 ${formatBytes(this.maxFileBytes)} 上限`)
-        }
-        throw err
-      }
-
-      if (!bytes) {
-        await this.driver.deleteArtifact(stored.path).catch(() => {})
-        throw new HttpError(422, '文件为空')
-      }
-      if (bytes > this.maxFileBytes) {
-        await this.driver.deleteArtifact(stored.path).catch(() => {})
-        throw new HttpError(413, `文件超过 ${formatBytes(this.maxFileBytes)} 上限`)
-      }
-
-      const sha256 = hash.digest('hex')
-      if (expectedSha256 && String(expectedSha256).toLowerCase() !== sha256) {
-        await this.driver.deleteArtifact(stored.path).catch(() => {})
-        throw new HttpError(422, 'sha256 与期望值不一致，已回滚上传')
-      }
-
+      const bytes = Number(size) || 0
       const row = {
         version: ver,
         state: 'unreleased',
@@ -279,12 +336,13 @@ export class DepStore {
           {
             name: String(fileName).trim(),
             storageName,
-            path: stored.path,
+            path: relPath,
             size: bytes,
             sha256,
             contentType: 'application/octet-stream',
           },
         ],
+        ...(partCount ? { partCount, partSize } : {}),
       }
 
       manifest.versions = sortVersions([...(manifest.versions || []), row])
@@ -293,10 +351,9 @@ export class DepStore {
       try {
         await this.driver.writeManifest(manifest)
       } catch (err) {
-        // 两段写没有事务，manifest 失败必须删掉刚写入的字节，
-        // 否则会留下绕过「版本不可变」的孤儿制品
-        await this.driver.deleteArtifact(stored.path).catch(() => {})
-        throw new HttpError(502, `登记版本失败，已回滚制品：${err.message}`)
+        throw new HttpError(502, `登记版本失败，已回滚制品：${err.message}`, {
+          code: 'MANIFEST_WRITE_FAILED',
+        })
       }
 
       this.index.set(manifest.code, manifest)
@@ -308,8 +365,12 @@ export class DepStore {
         version: ver,
         sha256,
         size: bytes,
+        ...(partCount ? { partCount } : {}),
       })
-      return { asset: summarize(manifest), version: { ...row, sha256 } }
+      // 响应里补一个 size：manifest 内部字段叫 totalSize，但接口契约（和
+      // GET /server/deps/{code} 的版本表）对外一律叫 size，这里对齐，免得
+      // 前端拿 res.version.size 拿到 undefined
+      return { asset: summarize(manifest), version: { ...row, size: bytes, sha256 } }
     })
   }
 

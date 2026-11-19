@@ -1,12 +1,17 @@
 /**
  * 依赖库路由。
  *
- * 挂在同一个 Express app 上，和插件库共用一套登录（Bearer token）与 Gitea 客户端。
+ * 挂在同一个 Express app 上，和插件库共用一套登录（Bearer token）。
  * 前缀沿用方案里的 /server/** 与 /client/**，将来接上网关不用改路径。
+ *
+ * 上传有两条通道：
+ *   POST /server/deps/{code}/versions                  单请求直传（小文件）
+ *   POST /server/deps/{code}/uploads + 分片 + complete  分片上传（MinIO 后端）
+ * 两者最终都汇到 DepStore.commitVersion，版本不可变的判定只有一处。
  */
 import { HttpError } from '../lib/http-error.js'
 import { DepStore } from '../lib/dep/store.js'
-import { createDepGiteaDriver } from '../lib/dep/storage.js'
+import { UploadManager } from '../lib/dep/uploads.js'
 import {
   CATEGORIES,
   OS_LIST,
@@ -29,25 +34,28 @@ function contentDisposition(name) {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`
 }
 
-export function mountDepRoutes(app, { config, gitea, requireAdmin, audit }) {
-  const driver = createDepGiteaDriver({
-    gitea,
-    cfg: {
-      giteaUrl: config.giteaUrl,
-      giteaToken: config.giteaToken,
-      owner: config.owner,
-      repo: config.repo,
-      branch: config.branch,
-      depsDir: config.depGiteaDir,
-    },
-  })
-
+export function mountDepRoutes(app, { config, driver, requireAdmin, audit }) {
   const store = new DepStore({
     driver,
     maxFileBytes: config.depMaxFileBytes,
     defaultActor: config.adminName,
     // 与插件库共用一份 audit.json，管理端「审计」页一次看完两类操作
     audit,
+  })
+
+  const objectStore = driver.store || null
+  const uploads = new UploadManager({
+    driver,
+    // 列会话要按前缀扫 meta/uploads/，由对象存储提供
+    listKeys: objectStore ? (prefix) => objectStore.listKeys(prefix) : null,
+    cfg: {
+      partSize: config.depPartSize,
+      maxParts: config.depMaxParts,
+      ttlHours: config.depUploadTtlHours,
+      maxFileBytes: config.depMaxFileBytes,
+      verifyMode: config.depVerifyMode,
+    },
+    commit: (payload) => store.commitVersion(payload),
   })
 
   // 索引初始化不阻塞启动；失败时接口会各自重试
@@ -66,12 +74,12 @@ export function mountDepRoutes(app, { config, gitea, requireAdmin, audit }) {
       assetStates: ASSET_STATES,
       maxFileBytes: config.depMaxFileBytes,
       storageDriver: driver.name,
-      store: {
-        owner: config.owner,
-        repo: config.repo,
-        branch: config.branch,
-        dir: config.depGiteaDir,
-      },
+      chunkedThresholdBytes: config.depChunkedThreshold,
+      partSize: config.depPartSize,
+      maxParts: config.depMaxParts,
+      uploadTtlHours: config.depUploadTtlHours,
+      verifyMode: config.depVerifyMode,
+      store: { bucket: config.minio.bucket },
     })
   })
 
@@ -179,6 +187,118 @@ export function mountDepRoutes(app, { config, gitea, requireAdmin, audit }) {
         res.on('finish', () => req.destroy())
         throw err
       }
+    }),
+  )
+
+  /* ------------------------------ 分片上传 ------------------------------ */
+
+  /**
+   * 创建会话。版本是否已占用在这里先判一次（早失败），
+   * 真正的判定在 complete 的 commitVersion 里持锁复查。
+   */
+  app.post(
+    '/server/deps/:code/uploads',
+    requireAdmin,
+    wrap(async (req, res) => {
+      const code = decode(req.params.code)
+      const { version, fileName, size, sha256, changelog, partSize } = req.body || {}
+      if (!version) throw new HttpError(422, '缺少版本号', { code: 'INVALID_VERSION' })
+
+      const { manifest, version: ver } = await store.reserveVersion(code, version)
+      const session = await uploads.create({
+        code: manifest.code,
+        version: ver,
+        fileName,
+        size,
+        sha256,
+        changelog,
+        partSize,
+        actor: req.admin.n,
+      })
+      res.status(201).json(session)
+    }),
+  )
+
+  /** 进行中的会话（管理端「上传中」列表；同时承担惰性过期清理） */
+  app.get(
+    '/server/deps/:code/uploads',
+    requireAdmin,
+    wrap(async (req, res) => {
+      const result = await uploads.list({
+        code: decode(req.params.code),
+        state: String(req.query.state || 'active'),
+      })
+      res.json(result)
+    }),
+  )
+
+  /** 查会话 + 已上传分片：断点续传的唯一入口 */
+  app.get(
+    '/server/deps/:code/uploads/:uploadId',
+    requireAdmin,
+    wrap(async (req, res) => {
+      const session = await uploads.get({
+        code: decode(req.params.code),
+        uploadId: decode(req.params.uploadId),
+      })
+      res.json(session)
+    }),
+  )
+
+  /**
+   * 上传一片。
+   *
+   * 三条硬约束：
+   *   1. 不能挂 express.json()/raw()（全局只挂了 json，且只处理 application/json）
+   *   2. 必须带 Content-Length —— S3 的 UploadPart 收 chunked body 会挂住
+   *   3. 失败要断开连接，否则浏览器会继续把剩余字节推给一个已经失败的请求
+   */
+  app.put(
+    '/server/deps/:code/uploads/:uploadId/parts/:partNumber',
+    requireAdmin,
+    wrap(async (req, res) => {
+      try {
+        const result = await uploads.putPart({
+          code: decode(req.params.code),
+          uploadId: decode(req.params.uploadId),
+          partNumber: Number(req.params.partNumber),
+          size: Number(req.headers['content-length']) || 0,
+          chunkSha256: req.headers['x-chunk-sha256'] || '',
+          stream: req,
+        })
+        res.json(result)
+      } catch (err) {
+        res.setHeader('Connection', 'close')
+        res.on('finish', () => req.destroy())
+        throw err
+      }
+    }),
+  )
+
+  /** 完成并登记版本。重复调用幂等，返回同一结果。 */
+  app.post(
+    '/server/deps/:code/uploads/:uploadId/complete',
+    requireAdmin,
+    wrap(async (req, res) => {
+      const outcome = await uploads.complete({
+        code: decode(req.params.code),
+        uploadId: decode(req.params.uploadId),
+        actor: req.admin.n,
+      })
+      res.status(201).json({ ok: true, ...outcome })
+    }),
+  )
+
+  /** 放弃会话：Abort 掉 S3 分片，不留半成品 */
+  app.delete(
+    '/server/deps/:code/uploads/:uploadId',
+    requireAdmin,
+    wrap(async (req, res) => {
+      const result = await uploads.abort({
+        code: decode(req.params.code),
+        uploadId: decode(req.params.uploadId),
+      })
+      res.json(result)
     }),
   )
 
