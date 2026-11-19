@@ -12,7 +12,8 @@ const INLINE_LIMIT = 8 * 1024 * 1024
 
 /**
  * @param {File} file
- * @param {(percent: number) => void} [onProgress] 0~100
+ * @param {(percent: number, loaded: number, total: number) => void} [onProgress]
+ *   0~100 与已处理字节；带上字节才能算实时速率
  * @returns {Promise<string>} 小写 hex；算不了时返回空串（调用方按「不校验」处理）
  */
 export async function sha256OfFile(file, onProgress) {
@@ -42,7 +43,7 @@ export async function sha256OfFile(file, onProgress) {
 
     worker.onmessage = (event) => {
       const msg = event.data || {}
-      if (msg.type === 'progress') onProgress?.(msg.percent)
+      if (msg.type === 'progress') onProgress?.(msg.percent, msg.loaded, msg.total)
       else if (msg.type === 'done') finish(msg.sha256 || '')
       else if (msg.type === 'error') finish('')
     }
@@ -61,7 +62,7 @@ async function sha256Inline(file, onProgress) {
   try {
     if (globalThis.crypto?.subtle) {
       const buffer = await file.arrayBuffer()
-      onProgress?.(100)
+      onProgress?.(100, file.size, file.size)
       return toHex(await crypto.subtle.digest('SHA-256', buffer))
     }
   } catch {
@@ -75,7 +76,7 @@ async function sha256Inline(file, onProgress) {
     for (let offset = 0; offset < file.size; offset += chunk) {
       const end = Math.min(offset + chunk, file.size)
       hasher.update(new Uint8Array(await file.slice(offset, end).arrayBuffer()))
-      onProgress?.(Math.round((end / file.size) * 100))
+      onProgress?.(Math.round((end / file.size) * 100), end, file.size)
     }
     return hasher.digest('hex')
   } catch {

@@ -5,13 +5,33 @@
  * 断点续传靠服务端返回的 parts 列表（ListParts 是唯一事实源），
  * 所以「暂停 / 刷新页面 / 换浏览器」都能接着传，不会从 0 重来。
  *
- * 进度口径是「已确认字节 / 总字节」，跨分片累加 —— 比 XHR 单请求的
- * upload.onprogress 更准，也是暂停后能正确恢复的原因。
+ * 进度为什么不用 fetch：
+ *   fetch 没有上传进度事件，只能在分片完成时拿到「又少一片」，
+ *   8 MiB 一片 + 3 并发，界面就会一次跳 1~3%，慢速网络下几秒不动。
+ *   这里用 XHR 拿 upload.onprogress，把每个分片「已发送字节」聚合起来，
+ *   进度才是连续的。代价是代码比 fetch 长一点，值得。
+ *
+ * 进度口径：已完成分片字节 + 各在传分片的已发送字节，节流 100ms 上报。
+ * 百分比封顶 99，100 留给服务端 complete 之后。
  */
 import { ApiError, getToken } from './client'
 
 const RETRY_DELAYS = [500, 1000, 2000]
+
+/**
+ * 暂停信号：不是 AbortError。
+ * 区别很重要 —— Abort 会掐断正在传的分片（S3 里半片无效，等于白传），
+ * 暂停要的是「不再取新片、把当前这几片传完再停」。
+ */
+export class PausedError extends Error {
+  constructor() {
+    super('paused')
+    this.name = 'PausedError'
+  }
+}
 const STORAGE_PREFIX = 'dep.upload.'
+const EMIT_INTERVAL_MS = 100
+const MAX_PERCENT = 99
 
 function authHeaders(extra = {}) {
   const token = getToken()
@@ -114,49 +134,91 @@ export async function abortUploadSession({ code, uploadId }) {
   )
 }
 
-/* ------------------------------ 分片 ------------------------------ */
+/* ------------------------------ 单一分片 ------------------------------ */
 
-async function putPart({ code, uploadId, partNumber, blob, signal, onBytes }) {
+/**
+ * 用 XHR 发一片。
+ * @param {(sent: number) => void} [onSent] 本片已发送字节，随上传实时回调
+ */
+function putPartXhr({ url, blob, headers, signal, onSent }) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url, true)
+    for (const [key, value] of Object.entries(headers)) {
+      if (value) xhr.setRequestHeader(key, value)
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onSent?.(event.loaded)
+    }
+
+    let abortedByUser = false
+    const onAbort = () => {
+      abortedByUser = true
+      xhr.abort()
+    }
+    if (signal) {
+      if (signal.aborted) {
+        reject(new DOMException('aborted', 'AbortError'))
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', onAbort)
+    }
+
+    xhr.onload = () => {
+      cleanup()
+      let body = null
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : null
+      } catch {
+        body = { message: xhr.responseText }
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body || {})
+        return
+      }
+      reject(new ApiError(xhr.status, body?.message || `分片上传失败（${xhr.status}）`, body))
+    }
+    xhr.onerror = () => {
+      cleanup()
+      reject(new ApiError(0, '网络中断，分片上传失败'))
+    }
+    xhr.onabort = () => {
+      cleanup()
+      reject(abortedByUser ? new DOMException('aborted', 'AbortError') : new ApiError(0, '已取消上传'))
+    }
+
+    xhr.send(blob)
+  })
+}
+
+async function putPart({ code, uploadId, partNumber, blob, signal, onSent }) {
+  const url =
+    `/server/deps/${encodeURIComponent(code)}/uploads/${encodeURIComponent(uploadId)}` +
+    `/parts/${partNumber}`
+
   for (let attempt = 0; ; attempt += 1) {
-    let res
     try {
       const headers = authHeaders({ 'Content-Type': 'application/octet-stream' })
       const sha = await chunkSha256(blob)
       if (sha) headers['X-Chunk-Sha256'] = sha
-
-      res = await fetch(
-        `/server/deps/${encodeURIComponent(code)}/uploads/${encodeURIComponent(uploadId)}` +
-          `/parts/${partNumber}`,
-        { method: 'PUT', headers, body: blob, signal },
-      )
+      return await putPartXhr({ url, blob, headers, signal, onSent })
     } catch (err) {
       if (err.name === 'AbortError') throw err
-      if (attempt >= RETRY_DELAYS.length) {
-        throw new ApiError(0, '网络中断，分片上传失败')
-      }
+
+      const errorCode = err?.body?.code
+      // 5xx 与校验失败可重试：校验失败重传同号会覆盖旧分片
+      const retriable =
+        err.status === undefined || err.status >= 500 || errorCode === 'CHUNK_CHECKSUM_MISMATCH'
+      if (!retriable || attempt >= RETRY_DELAYS.length) throw err
+
+      // 重试前把本片计数清零，否则新旧两条连接的字节会叠加成虚高进度
+      onSent?.(0)
       await sleep(RETRY_DELAYS[attempt])
-      continue
     }
-
-    if (res.ok) {
-      onBytes?.(blob.size)
-      return res.json().catch(() => ({}))
-    }
-
-    const text = await res.text().catch(() => '')
-    let body = null
-    try {
-      body = text ? JSON.parse(text) : null
-    } catch {
-      body = { message: text }
-    }
-
-    // 5xx 才重试；校验失败重试一次（重传同号会覆盖旧分片）
-    const retriable = res.status >= 500 || body?.code === 'CHUNK_CHECKSUM_MISMATCH'
-    if (!retriable || attempt >= RETRY_DELAYS.length) {
-      throw new ApiError(res.status, body?.message || `分片上传失败（${res.status}）`, body)
-    }
-    await sleep(RETRY_DELAYS[attempt])
   }
 }
 
@@ -173,8 +235,11 @@ async function putPart({ code, uploadId, partNumber, blob, signal, onBytes }) {
  * @param {string} [p.changelog]
  * @param {number} [p.concurrency]   并发分片数，默认 3
  * @param {(percent:number, loaded:number, total:number) => void} [p.onProgress]
+ *   100ms 节流；loaded 含在传分片的已发送字节，所以是连续的
  * @param {(session:object) => void} [p.onSession] 会话建立时回调（UI 记 uploadId）
- * @param {AbortSignal} [p.signal]
+ * @param {() => boolean} [p.shouldPause] 返回 true 时停止调度新分片，
+ *   等在传的分片落地后抛 PausedError（不是 AbortError）
+ * @param {AbortSignal} [p.signal] 取消上传用，会立刻掐断在传分片
  */
 export async function uploadDepVersionChunked({
   code,
@@ -185,6 +250,7 @@ export async function uploadDepVersionChunked({
   concurrency = 3,
   onProgress,
   onSession,
+  shouldPause,
   signal,
 }) {
   const params = { code, version, fileName: file.name, size: file.size }
@@ -202,9 +268,27 @@ export async function uploadDepVersionChunked({
   rememberSession(params, uploadId)
   onSession?.(session)
 
-  const done = new Set((session.parts || []).map((p) => p.partNumber))
-  let uploaded = (session.parts || []).reduce((n, p) => n + (Number(p.size) || 0), 0)
-  onProgress?.(percentOf(uploaded, file.size), uploaded, file.size)
+  const total = file.size
+  let doneBytes = 0
+  const inflight = new Map() // partNumber -> 已发送字节
+  let lastEmit = 0
+
+  /** 节流上报：XHR 的 progress 触发很密，每帧 setState 会把主线程拖住 */
+  const emit = (force = false) => {
+    const now = Date.now()
+    if (!force && now - lastEmit < EMIT_INTERVAL_MS) return
+    lastEmit = now
+    let sent = 0
+    for (const value of inflight.values()) sent += value
+    const loaded = Math.min(total, doneBytes + sent)
+    const percent = total > 0 ? Math.min(MAX_PERCENT, Math.floor((loaded / total) * 100)) : 0
+    onProgress?.(percent, loaded, total)
+  }
+
+  // 续传：已完成的分片直接计入
+  const done = new Set((session.parts || []).map((p) => Number(p.partNumber)))
+  for (const p of session.parts || []) doneBytes += Number(p.size) || 0
+  emit(true)
 
   const pending = []
   for (let n = 1; n <= partCount; n += 1) if (!done.has(n)) pending.push(n)
@@ -213,11 +297,16 @@ export async function uploadDepVersionChunked({
   const worker = async () => {
     while (cursor < pending.length) {
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+      // 暂停：不再取新片；已经发出去的那片由下面的 await 等它传完
+      if (shouldPause?.()) throw new PausedError()
       const partNumber = pending[cursor]
       cursor += 1
 
       const start = (partNumber - 1) * partSize
-      const blob = file.slice(start, Math.min(start + partSize, file.size))
+      const blob = file.slice(start, Math.min(start + partSize, total))
+
+      inflight.set(partNumber, 0)
+      emit()
 
       await putPart({
         code,
@@ -225,16 +314,34 @@ export async function uploadDepVersionChunked({
         partNumber,
         blob,
         signal,
-        onBytes: (bytes) => {
-          uploaded += bytes
-          onProgress?.(percentOf(uploaded, file.size), uploaded, file.size)
+        onSent: (sent) => {
+          /**
+           * 不能用 max 兜底：重试时旧连接可能已经发到 8 MiB，新连接从 0 开始，
+           * 取 max 会让进度卡在旧值上一整个分片的时长。直接覆盖，允许回退
+           * 最多一个分片（0.4%），比「不动」好判断得多。
+           */
+          inflight.set(partNumber, sent)
+          emit()
         },
       })
+
+      inflight.delete(partNumber)
+      doneBytes += blob.size
+      emit(true)
     }
   }
 
   const workers = Math.max(1, Math.min(concurrency, pending.length || 1))
-  await Promise.all(Array.from({ length: workers }, worker))
+  /**
+   * 用 allSettled 而不是 all：一个 worker 收到暂停信号就抛了，另外两个
+   * 还在传当前这片。必须等它们传完（落地），否则暂停前那几片全白传。
+   */
+  const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()))
+  const failed = settled.find((r) => r.status === 'rejected')?.reason
+  if (failed) throw failed
+
+  // 分片都已落地，剩下是服务端合并 + 登记，进度停在 99 等结果
+  onProgress?.(MAX_PERCENT, total, total)
 
   const result = await requestJson(
     `/server/deps/${encodeURIComponent(code)}/uploads/${encodeURIComponent(uploadId)}/complete`,
@@ -247,13 +354,8 @@ export async function uploadDepVersionChunked({
   )
 
   forgetSession(params)
-  onProgress?.(100, file.size, file.size)
+  onProgress?.(100, total, total)
   return result
-}
-
-function percentOf(loaded, total) {
-  if (!total) return 0
-  return Math.min(99, Math.floor((loaded / total) * 100))
 }
 
 function sleep(ms) {

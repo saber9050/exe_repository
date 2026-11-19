@@ -18,6 +18,22 @@ export function formatCount(n) {
   return String(num)
 }
 
+/**
+ * 剩余时间：秒数 -> 「1 小时 5 分」「2 分 13 秒」「8 秒」
+ * 只保留两级，避免「1 小时 5 分 23 秒」这种读起来费劲的串。
+ */
+export function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0))
+  if (s < 1) return '不到 1 秒'
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  const rest = s % 60
+  if (m < 60) return rest ? `${m} 分 ${rest} 秒` : `${m} 分`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  return mm ? `${h} 小时 ${mm} 分` : `${h} 小时`
+}
+
 export function timeAgo(iso) {
   if (!iso) return '—'
   const t = new Date(iso).getTime()

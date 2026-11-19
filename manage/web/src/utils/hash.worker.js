@@ -5,6 +5,9 @@
  * arrayBuffer() 再 digest，2 GiB 文件会直接把内存打爆（旧实现就是这么写的，
  * 注释里还留着"文件上限 50MB"的老前提）。hash-wasm 支持 update 逐块喂，
  * 在 Worker 里跑还不会卡住上传界面。
+ *
+ * 进度回调带 loaded/total，界面才能算出「已处理字节」和实时速率 ——
+ * 只给百分比的话，2 GiB 文件的速率只能靠估。
  */
 import { createSHA256 } from 'hash-wasm'
 
@@ -21,7 +24,12 @@ self.onmessage = async (event) => {
       const end = Math.min(offset + CHUNK, total)
       const buffer = await file.slice(offset, end).arrayBuffer()
       hasher.update(new Uint8Array(buffer))
-      self.postMessage({ type: 'progress', percent: Math.round((end / total) * 100) })
+      self.postMessage({
+        type: 'progress',
+        percent: Math.round((end / total) * 100),
+        loaded: end,
+        total,
+      })
     }
 
     self.postMessage({ type: 'done', sha256: hasher.digest('hex') })

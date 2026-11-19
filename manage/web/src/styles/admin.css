@@ -1608,3 +1608,21 @@
   place-items: center;
   flex: none;
 }
+
+/* 进度条下方的明细：左侧阶段 + 已传字节，右侧速率 + 剩余时间 */
+.progress__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -8px 18px 14px;
+  font-size: 11px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress__meta span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

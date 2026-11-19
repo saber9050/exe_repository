@@ -12,7 +12,7 @@ import {
   takeDownDep,
   uploadDepVersion,
 } from '../../api/deps'
-import { abortUploadSession, uploadDepVersionChunked } from '../../api/upload'
+import { PausedError, abortUploadSession, uploadDepVersionChunked } from '../../api/upload'
 import { sha256OfFile } from '../../utils/hash'
 import { useAuth } from '../../context/AuthContext'
 import { useToast } from '../../context/ToastContext'
@@ -28,7 +28,14 @@ import {
   Upload,
   X,
 } from '../../components/Icons'
-import { STATUS_META, VERSION_STATE_META, formatBytes, formatDate, timeAgo } from '../../utils/format'
+import {
+  STATUS_META,
+  VERSION_STATE_META,
+  formatBytes,
+  formatDate,
+  formatDuration,
+  timeAgo,
+} from '../../utils/format'
 
 export default function AdminDepDetail() {
   const { code } = useParams()
@@ -51,19 +58,31 @@ export default function AdminDepDetail() {
   const [changelog, setChangelog] = useState('')
   const [file, setFile] = useState(null)
   const [dragOver, setDragOver] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [speed, setSpeed] = useState(0)
   const [phase, setPhase] = useState('idle') // idle | hashing | uploading | paused
-  const [hashPercent, setHashPercent] = useState(0)
+  const [progress, setProgress] = useState(0)
+  const [loaded, setLoaded] = useState(0)
+  const [speed, setSpeed] = useState(0)
+  const [eta, setEta] = useState(0)
+  const [hashState, setHashState] = useState('idle') // idle | running | done
+  /** 已请求暂停，正在等在传的分片落地 */
+  const [pausing, setPausing] = useState(false)
+  const pauseRequestedRef = useRef(false)
   const [error, setError] = useState('')
   const inputRef = useRef(null)
   const abortRef = useRef(null)
-  const pauseIntentRef = useRef(false)
-  const startedAt = useRef(0)
-  // 已算过的整体 sha256：暂停后继续时不必重算 2 GiB
-  const shaRef = useRef({ file: null, sha256: '' })
-  // 当前分片会话，取消时用来 Abort 掉 S3 分片
+  const phaseRef = useRef('idle')
+  /** sha256 任务：选完文件就开始算，不等点「上传」 */
+  const hashJobRef = useRef({ token: 0, file: null, sha256: '', promise: null })
+  /** 速率采样：只保留最近 3 秒，用总平均会让速度「只降不升」 */
+  const rateRef = useRef({ stage: '', samples: [] })
+  /** 速率再做一层指数平滑，避免剩余时间跟着抖动 */
+  const smoothRateRef = useRef(0)
+  /** 当前分片会话，取消时用来 Abort 掉 S3 分片 */
   const sessionRef = useRef(null)
+
+  useEffect(() => {
+    phaseRef.current = phase
+  }, [phase])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -89,6 +108,71 @@ export default function AdminDepDetail() {
   const categoryLabel = (key) =>
     (meta?.categories || []).find((c) => c.key === key)?.label || key
 
+  /**
+   * 3 秒滑动窗口的即时速率（B/s）。
+   *
+   * 用「第一次采样到当前」的平均会让速度只降不升：网络从 2 MB/s 提到 8 MB/s，
+   * 显示也不会变。只取最近 3 秒才能反映当下。
+   */
+  const trackRate = (stage, bytes) => {
+    const now = Date.now()
+    const rate = rateRef.current
+    if (rate.stage !== stage) {
+      rate.stage = stage
+      rate.samples = []
+    }
+    rate.samples.push({ t: now, bytes })
+    while (rate.samples.length > 2 && now - rate.samples[0].t > 3000) rate.samples.shift()
+
+    const first = rate.samples[0]
+    const seconds = (now - first.t) / 1000
+    if (seconds < 0.25) return 0
+
+    const instant = Math.max(0, (bytes - first.bytes) / seconds)
+    // 指数平滑：新值只占三成，剩余时间不会一秒一个样
+    smoothRateRef.current = smoothRateRef.current
+      ? smoothRateRef.current * 0.7 + instant * 0.3
+      : instant
+    return smoothRateRef.current
+  }
+
+  /**
+   * 算整体 sha256。选完文件就开跑：用户填版本号、写更新说明的这十几秒
+   * 里，几 GB 的摘要已经算完了，点上传时能直接进传输。
+   */
+  const startHash = useCallback((f) => {
+    const token = hashJobRef.current.token + 1
+    hashJobRef.current.token = token
+    hashJobRef.current.file = f
+    hashJobRef.current.sha256 = ''
+    setHashState('running')
+    rateRef.current = { stage: 'hash', samples: [] }
+    smoothRateRef.current = 0
+
+    const promise = sha256OfFile(f, (percent, done, total) => {
+      if (hashJobRef.current.token !== token) return
+      const rate = trackRate('hash', done)
+      setProgress(percent)
+      setLoaded(done)
+      if (rate > 0) {
+        setSpeed(rate)
+        setEta((total - done) / rate)
+      }
+    }).then((sha) => {
+      if (hashJobRef.current.token !== token) return ''
+      hashJobRef.current.sha256 = sha
+      setHashState(sha ? 'done' : 'idle')
+      setSpeed(0)
+      setEta(0)
+      // 后台算完了但用户还没点上传，别把进度条留在 100%
+      if (phaseRef.current === 'idle') setProgress(0)
+      return sha
+    })
+
+    hashJobRef.current.promise = promise
+    return promise
+  }, [])
+
   const pickFile = (f) => {
     if (!f) return
     setError('')
@@ -96,9 +180,12 @@ export default function AdminDepDetail() {
       setError(`文件 ${formatBytes(f.size)} 超过上限 ${formatBytes(maxBytes)}`)
       return
     }
-    shaRef.current = { file: null, sha256: '' }
-    setHashPercent(0)
+    setProgress(0)
+    setLoaded(0)
+    setSpeed(0)
+    setEta(0)
     setFile(f)
+    startHash(f)
   }
 
   const runUpload = async () => {
@@ -114,31 +201,50 @@ export default function AdminDepDetail() {
 
     const controller = new AbortController()
     abortRef.current = controller
+    pauseRequestedRef.current = false
+    setPausing(false)
     const useChunked = file.size > chunkedThreshold
-    startedAt.current = Date.now()
 
     try {
       /**
        * 整体 sha256 只在需要时算一次：分片模式用它做完整校验，
        * 单请求模式由服务端边收边算（这里只当「期望值」）。
        */
-      let sha256 = shaRef.current.file === file ? shaRef.current.sha256 : ''
+      let sha256 = hashJobRef.current.file === file ? hashJobRef.current.sha256 : ''
       if (useChunked && !sha256) {
         setPhase('hashing')
-        setHashPercent(0)
-        sha256 = await sha256OfFile(file, setHashPercent)
+        setProgress(0)
+        setLoaded(0)
+        setSpeed(0)
+        setEta(0)
+        const job = hashJobRef.current.file === file && hashJobRef.current.promise
+        sha256 = await (job || startHash(file))
         if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
         if (!sha256) {
           setPhase('idle')
           setError('无法计算文件校验和，请换用 Chrome / Edge 后重试')
           return
         }
-        shaRef.current = { file, sha256 }
       }
 
       setPhase('uploading')
       setProgress(0)
+      setLoaded(0)
       setSpeed(0)
+      setEta(0)
+      rateRef.current = { stage: 'upload', samples: [] }
+      smoothRateRef.current = 0
+
+      const handleProgress = (percent, done, totalArg) => {
+        const totalBytes = totalArg || file.size
+        setProgress(percent)
+        setLoaded(done)
+        const rate = trackRate('upload', done)
+        if (rate > 0) {
+          setSpeed(rate)
+          setEta(Math.max(0, (totalBytes - done) / rate))
+        }
+      }
 
       const res = useChunked
         ? await uploadDepVersionChunked({
@@ -151,11 +257,8 @@ export default function AdminDepDetail() {
             onSession: (session) => {
               sessionRef.current = session
             },
-            onProgress: (pct, loaded) => {
-              setProgress(pct)
-              const elapsed = (Date.now() - startedAt.current) / 1000
-              if (elapsed > 0.4) setSpeed(loaded / elapsed)
-            },
+            onProgress: handleProgress,
+            shouldPause: () => pauseRequestedRef.current,
           })
         : await uploadDepVersion({
             code,
@@ -163,11 +266,7 @@ export default function AdminDepDetail() {
             file,
             changelog,
             signal: controller.signal,
-            onProgress: (pct, loaded) => {
-              setProgress(pct)
-              const elapsed = (Date.now() - startedAt.current) / 1000
-              if (elapsed > 0.4) setSpeed(loaded / elapsed)
-            },
+            onProgress: handleProgress,
           })
 
       const sha = res?.version?.sha256 || ''
@@ -176,34 +275,45 @@ export default function AdminDepDetail() {
       setVersion('')
       setChangelog('')
       setProgress(0)
+      setLoaded(0)
       setSpeed(0)
-      setHashPercent(0)
+      setEta(0)
+      setHashState('idle')
       setPhase('idle')
-      shaRef.current = { file: null, sha256: '' }
+      hashJobRef.current = { token: hashJobRef.current.token, file: null, sha256: '', promise: null }
       sessionRef.current = null
       if (inputRef.current) inputRef.current.value = ''
       load()
     } catch (err) {
+      if (err.name === 'PausedError') {
+        // 软暂停：在传的分片已经落地，进度和会话都保留，点继续能直接接着传
+        pauseRequestedRef.current = false
+        setPausing(false)
+        setSpeed(0)
+        setEta(0)
+        setPhase('paused')
+        return
+      }
       if (err.name === 'AbortError' || controller.signal.aborted) {
         // 暂停：保留进度、文件与会话，点「继续」接着传；取消：回到初始态并清掉分片
-        if (pauseIntentRef.current) {
-          pauseIntentRef.current = false
-          setPhase('paused')
-        } else {
-          if (sessionRef.current?.uploadId) {
-            abortUploadSession({ code, uploadId: sessionRef.current.uploadId }).catch(() => {})
-          }
-          sessionRef.current = null
-          toast('已取消上传', 'info')
-          setProgress(0)
-          setSpeed(0)
-          setPhase('idle')
+        // 走到这里只剩「取消」：暂停走的是 PausedError，不会 abort
+        if (sessionRef.current?.uploadId) {
+          abortUploadSession({ code, uploadId: sessionRef.current.uploadId }).catch(() => {})
         }
+        sessionRef.current = null
+        toast('已取消上传', 'info')
+        setProgress(0)
+        setLoaded(0)
+        setSpeed(0)
+        setEta(0)
+        setPhase('idle')
       } else {
         setError(err.message || '上传失败')
         toast(err.message || '上传失败', 'error')
         setProgress(0)
+        setLoaded(0)
         setSpeed(0)
+        setEta(0)
         setPhase('idle')
       }
     } finally {
@@ -217,10 +327,13 @@ export default function AdminDepDetail() {
   }
 
   const cancelUpload = () => {
-    pauseIntentRef.current = false
+    pauseRequestedRef.current = false
+    setPausing(false)
     setPhase('idle')
     setProgress(0)
+    setLoaded(0)
     setSpeed(0)
+    setEta(0)
     abortRef.current?.abort()
   }
 
@@ -229,10 +342,15 @@ export default function AdminDepDetail() {
       runUpload()
       return
     }
-    if (phase !== 'uploading') return
-    // 分片模式下中断只是停住调度；已传分片留在服务端，继续时按 ListParts 补齐
-    pauseIntentRef.current = true
-    abortRef.current?.abort()
+    if (phase !== 'uploading' || pausing) return
+    /**
+     * 软暂停：不 abort。
+     * abort 会掐断正在传的分片，而 S3 里半片无效 —— 暂停时如果一片都没传完，
+     * 继续就等于从零开始。这里只置标志，让 worker 在下一个分片边界停下，
+     * 已发出去的那几片继续传完再结束。
+     */
+    pauseRequestedRef.current = true
+    setPausing(true)
   }
 
   const onEnable = async (v) => {
@@ -329,6 +447,51 @@ export default function AdminDepDetail() {
     )
   }
   if (!asset) return null
+
+  /**
+   * 进度信息分三块：
+   *   进度条内 —— 只放百分比，字号小、居中，一眼看到大概
+   *   左下   —— 阶段 + 已传/总量。整数百分比在慢速网络下几秒才涨 1%，
+   *            只有「614 KB / 30.0 MB」这种连续变化的字节数才能让人确信没卡住
+   *   右下   —— 速率 + 剩余时间
+   */
+  const progressView = (() => {
+    const rate = speed > 0 ? `${formatBytes(speed)}/s` : ''
+    const size = `${formatBytes(loaded)} / ${formatBytes(file?.size || 0)}`
+    const remain =
+      eta > 0 && Number.isFinite(eta) && eta < 24 * 3600 ? `剩余 ${formatDuration(eta)}` : ''
+
+    if (phase === 'hashing') {
+      return {
+        label: `${progress}%`,
+        left: `计算校验和 · ${size}`,
+        right: [rate, remain].filter(Boolean).join(' · '),
+      }
+    }
+    if (phase === 'paused') {
+      return {
+        label: `${progress}%`,
+        left: `已暂停 · ${size}`,
+        right: '点「继续」从缺失的分片接着传',
+      }
+    }
+    if (pausing) {
+      return {
+        label: `${progress}%`,
+        left: `正在暂停 · ${size}`,
+        right: '等待当前分片写入…',
+      }
+    }
+    if (progress >= 100) return { label: '100%', left: '上传完成', right: '' }
+    if (progress >= 99) {
+      return {
+        label: '99%',
+        left: '分片已传完，服务端合并登记中…',
+        right: rate,
+      }
+    }
+    return { label: `${progress}%`, left: `上传中 · ${size}`, right: [rate, remain].filter(Boolean).join(' · ') }
+  })()
 
   const state = STATUS_META[asset.status] || STATUS_META.unreleased
 
@@ -580,13 +743,32 @@ export default function AdminDepDetail() {
                 </span>
                 <div className="filecard__info">
                   <strong className="mono">{file.name}</strong>
-                  <span>{formatBytes(file.size)}</span>
+                  <span>
+                    {formatBytes(file.size)}
+                    {phase === 'hashing' || hashState === 'running'
+                      ? ` · 校验中 ${progress}%`
+                      : hashState === 'done'
+                        ? ' · 校验和已就绪'
+                        : ''}
+                  </span>
                 </div>
                 <button
                   type="button"
                   className="icon-btn"
                   onClick={() => {
                     setFile(null)
+                    // 作废后台的校验任务：让它的回调不再回写 UI
+                    hashJobRef.current = {
+                      token: hashJobRef.current.token + 1,
+                      file: null,
+                      sha256: '',
+                      promise: null,
+                    }
+                    setHashState('idle')
+                    setProgress(0)
+                    setLoaded(0)
+                    setSpeed(0)
+                    setEta(0)
                     if (inputRef.current) inputRef.current.value = ''
                   }}
                   disabled={phase === 'uploading' || phase === 'hashing'}
@@ -609,22 +791,17 @@ export default function AdminDepDetail() {
               />
             </label>
 
-            {(phase !== 'idle' || progress > 0) && (
-              <div className="progress" style={{ marginTop: 12 }}>
-                <div
-                  className="progress__bar"
-                  style={{ width: `${phase === 'hashing' ? hashPercent : progress}%` }}
-                />
-                <span className="progress__label">
-                  {phase === 'hashing'
-                    ? `计算校验和 ${hashPercent}%`
-                    : phase === 'paused'
-                      ? `已暂停 ${progress}%`
-                      : progress < 100
-                        ? `上传中 ${progress}%${speed ? ` · ${formatBytes(speed)}/s` : ''}`
-                        : '分片已合并，服务端正在登记版本…'}
-                </span>
-              </div>
+            {phase !== 'idle' && (
+              <>
+                <div className="progress" style={{ marginTop: 12 }}>
+                  <div className="progress__bar" style={{ width: `${progress}%` }} />
+                  <span className="progress__label">{progressView.label}</span>
+                </div>
+                <div className="progress__meta">
+                  <span>{progressView.left}</span>
+                  <span>{progressView.right}</span>
+                </div>
+              </>
             )}
 
             {error && (
@@ -643,10 +820,10 @@ export default function AdminDepDetail() {
                   type="button"
                   className="btn btn--secondary"
                   onClick={togglePause}
-                  disabled={phase === 'hashing'}
-                  title={phase === 'hashing' ? '校验和计算中，暂时无法暂停' : ''}
+                  disabled={phase === 'hashing' || pausing}
+                  title={phase === 'hashing' ? '校验和计算中，暂时无法暂停' : pausing ? '正在等待当前分片写入' : ''}
                 >
-                  {phase === 'paused' ? '继续' : '暂停'}
+                  {phase === 'paused' ? '继续' : pausing ? '暂停中…' : '暂停'}
                 </button>
               </div>
             ) : (
@@ -662,7 +839,7 @@ export default function AdminDepDetail() {
             )}
             {phase === 'paused' && (
               <p className="field__hint" style={{ marginTop: 6 }}>
-                已暂停。已上传的分片保留在服务端，点「继续」会从缺失的分片接着传，不会重头再来。
+                已暂停。已写入的分片都保留在服务端，点「继续」只补缺失的分片。
               </p>
             )}
             <p className="field__hint" style={{ marginTop: 8 }}>
