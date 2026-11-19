@@ -65,15 +65,28 @@ export class UploadManager {
   /**
    * @param {object} p
    * @param {object} p.driver            存储驱动（MinIO 对象存储）
-   * @param {(prefix: string) => Promise<Array<{key: string}>>} [p.listKeys] 列会话用
    * @param {object} p.cfg               { partSize, maxParts, ttlHours, maxFileBytes, verifyMode }
    * @param {(payload: object) => Promise<object>} p.commit 登记版本（DepStore.commitVersion）
    */
-  constructor({ driver, listKeys, cfg, commit }) {
+  constructor({ driver, cfg, commit }) {
     this.driver = driver
-    this.listKeys = listKeys || null
     this.cfg = cfg
     this.commit = commit
+  }
+
+  /**
+   * 列出会话文件（相对 key，如 `up_xxx.json`）。
+   * 前缀由 driver.meta.list 负责拼，这里只关心逻辑前缀 `uploads/`。
+   */
+  async listSessions() {
+    if (typeof this.driver.meta.list !== 'function') return []
+    try {
+      return await this.driver.meta.list(UPLOAD_PREFIX)
+    } catch {
+      throw new HttpError(502, '读取上传会话失败：存储不可用，请稍后重试', {
+        code: 'STORAGE_UNAVAILABLE',
+      })
+    }
   }
 
 
@@ -245,16 +258,15 @@ export class UploadManager {
 
   /** 找同资产同版本的未完成会话（只要还有效） */
   async findActive(code, version) {
-    if (!this.listKeys) return null
-    let keys = []
+    let items = []
     try {
-      keys = await this.listKeys(UPLOAD_PREFIX)
+      items = await this.listSessions()
     } catch {
       return null
     }
-    for (const item of keys) {
+    for (const item of items) {
       if (!String(item.key).endsWith('.json')) continue
-      const uploadId = String(item.key).slice(UPLOAD_PREFIX.length).replace(/\.json$/, '')
+      const uploadId = String(item.key).replace(/\.json$/, '')
       const session = await this.readSession(uploadId).catch(() => null)
       if (!session) continue
       if (session.state === 'done') continue
@@ -289,23 +301,14 @@ export class UploadManager {
   }
 
   async list({ code, state = 'active' }) {
-    if (!this.listKeys) return { items: [], total: 0 }
     const safeCode = code ? assertCode(code) : ''
-
-    let keys
-    try {
-      keys = await this.listKeys(UPLOAD_PREFIX)
-    } catch {
-      throw new HttpError(502, '读取上传会话失败：存储不可用，请稍后重试', {
-        code: 'STORAGE_UNAVAILABLE',
-      })
-    }
+    const keys = await this.listSessions()
 
     const items = []
     for (const item of keys) {
       const key = String(item.key)
       if (!key.endsWith('.json')) continue
-      const uploadId = key.slice(UPLOAD_PREFIX.length).replace(/\.json$/, '')
+      const uploadId = key.replace(/\.json$/, '')
       const session = await this.readSession(uploadId).catch(() => null)
       if (!session) continue
       if (safeCode && session.code !== safeCode) continue

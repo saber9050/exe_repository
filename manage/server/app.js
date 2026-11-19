@@ -179,12 +179,49 @@ export function createManageApp(options = {}) {
    * 放后台跑：存储慢或不可达时管理界面照样能打开，接口自己会返回 502。
    */
   async function init() {
+    let storageReady = false
+
     try {
-      await objectStore.headBucket()
-      log(`[manage] 对象存储可用 bucket=${config.minio.bucket}（${config.minio.endpoint}:${config.minio.port}）`)
+      const result = await objectStore.ensureBucket({
+        autoCreate: config.minio.autoCreateBucket,
+        abortIncompleteDays: config.minio.abortIncompleteDays,
+      })
+      const where = `${config.minio.endpoint}:${config.minio.port}/${config.minio.bucket}`
+      if (result.created) {
+        log(`[manage] 桶 ${config.minio.bucket} 不存在，已自动创建（默认私有）`)
+      }
+      log(`[manage] 对象存储可用 ${where}`)
+      storageReady = true
+
+      if (result.lifecycle === 'unsupported') {
+        log(
+          '[manage] 当前 MinIO 版本不支持「中断分片自动清理」的生命周期规则，已跳过。' +
+            '过期会话仍由服务端 TTL 兜底（查询会话时触发 Abort）；' +
+            '要让存储侧自动回收，需要升级 MinIO 到支持 AbortIncompleteMultipartUpload 的版本。',
+        )
+      }
+      if (result.lifecycle === 'forbidden') {
+        log('[manage] 配不了生命周期规则：凭据缺少 PutBucketLifecycleConfiguration 权限，已跳过（不影响上传下载）')
+      }
+      if (result.publicRead) {
+        log(
+          `[manage] 警告：桶 ${config.minio.bucket} 的策略允许匿名读，` +
+            '任何人拿到对象 key 都能绕过接口直接下载。建议删掉这条 bucket policy。',
+        )
+      }
     } catch (err) {
-      log('[manage] 对象存储探测失败（服务仍会启动，接口可能返回 502）', err.message)
+      if (err?.name === 'BucketNotFound') {
+        log(
+          `[manage] 桶 ${config.minio.bucket} 不存在，且 MINIO_AUTO_CREATE_BUCKET=false。` +
+            '请先手工建桶（mc mb），或把该开关打开后重启。',
+        )
+      } else {
+        log('[manage] 对象存储初始化失败（服务仍会启动，接口可能返回 502）', err.message)
+      }
     }
+
+    // 桶都不可用时不用再读清单，否则会紧跟着报一条同样根因的错误，掩盖上面的提示
+    if (!storageReady) return
 
     try {
       await dep.store.ensureIndex({ force: true })

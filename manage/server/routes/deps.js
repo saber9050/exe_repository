@@ -43,11 +43,8 @@ export function mountDepRoutes(app, { config, driver, requireAdmin, audit }) {
     audit,
   })
 
-  const objectStore = driver.store || null
   const uploads = new UploadManager({
     driver,
-    // 列会话要按前缀扫 meta/uploads/，由对象存储提供
-    listKeys: objectStore ? (prefix) => objectStore.listKeys(prefix) : null,
     cfg: {
       partSize: config.depPartSize,
       maxParts: config.depMaxParts,
@@ -58,10 +55,12 @@ export function mountDepRoutes(app, { config, driver, requireAdmin, audit }) {
     commit: (payload) => store.commitVersion(payload),
   })
 
-  // 索引初始化不阻塞启动；失败时接口会各自重试
-  store.ensureIndex({ force: true }).catch((err) => {
-    console.error('[server] 依赖库索引加载失败：', err.message)
-  })
+  /**
+   * 索引预热交给 app.init()：那里先确保桶存在再读清单。
+   * 不在这里预热，否则桶还没建好就先报一条「读取清单失败」，
+   * 与随后的「已自动创建桶」自相矛盾，排查时很误导。
+   * 首次请求仍会惰性加载，只是少了启动期的那一次。
+   */
 
   /* ============================== 管理端 ============================== */
 

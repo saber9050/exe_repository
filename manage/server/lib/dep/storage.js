@@ -218,6 +218,21 @@ export function createDepDriver({ store }) {
       async deleteKey(key) {
         return store.deleteObject(`meta/${key}`)
       },
+      /**
+       * 列 meta/{prefix} 下的对象，返回**相对 key**（如 `up_xxx.json`）。
+       *
+       * 不能直接拿 store.listKeys 去扫 `uploads/`：会话实际写在
+       * `meta/uploads/` 下，查错前缀的结果是「永远没有进行中的会话」，
+       * 表现为暂停后继续又从第 1 片开始传。前缀收敛在这一层，上层不该知道 meta/。
+       */
+      async list(prefix) {
+        const base = `meta/${prefix}`
+        const items = await store.listKeys(base)
+        return items.map((item) => ({
+          key: String(item.key).startsWith(base) ? String(item.key).slice(base.length) : String(item.key),
+          size: item.size,
+        }))
+      },
     },
 
     /** 供路由按前缀列上传会话 */

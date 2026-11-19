@@ -11,6 +11,7 @@
  *   3. 这一层只做「对象读写」，任何业务判定（可见性 / 版本状态）都在上层
  */
 import { Readable } from 'node:stream'
+import crypto from 'node:crypto'
 import {
   S3Client,
   PutObjectCommand,
@@ -23,14 +24,81 @@ import {
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
   ListObjectsV2Command,
+  HeadBucketCommand,
+  CreateBucketCommand,
+  GetBucketPolicyCommand,
+  PutBucketLifecycleConfigurationCommand,
 } from '@aws-sdk/client-s3'
 
 const unquote = (etag) => String(etag || '').replace(/^"+|"+$/g, '')
 
-/** 统一把 SDK 的异常翻译成「存储不可用 / 不存在」两类，上层不关心 AWS 细节 */
-function isNotFound(err) {
+/**
+ * 404 有两种完全不同的含义，不能合并：
+ *   NoSuchBucket —— 桶没建，运维错误，接口该回 502（存储不可用）
+ *   NoSuchKey    —— 对象不存在，业务语义，接口该回 404
+ * 早期把两者都翻成「对象不存在」，排查时会被带偏到完全错误的方向。
+ */
+function isNoSuchBucket(err) {
   const status = err?.$metadata?.httpStatusCode
-  return status === 404 || err?.name === 'NoSuchKey' || err?.name === 'NotFound' || err?.Code === 'NoSuchKey'
+  const code = err?.Code || err?.name
+  if (code === 'NoSuchBucket') return true
+  // HeadBucket 对不存在的桶只回 404、没有响应体，只能从 message 里认
+  return status === 404 && /NoSuchBucket/i.test(String(err?.message || ''))
+}
+
+function isNoSuchKey(err) {
+  const status = err?.$metadata?.httpStatusCode
+  const code = err?.Code || err?.name
+  return (
+    code === 'NoSuchKey' ||
+    code === 'NotFound' ||
+    code === 'NoSuchVersion' ||
+    status === 404
+  )
+}
+
+const notFoundError = () => {
+  const e = new Error('对象不存在')
+  e.name = 'ObjectNotFound'
+  return e
+}
+
+const bucketMissingError = () => {
+  const e = new Error('桶不存在')
+  e.name = 'BucketNotFound'
+  return e
+}
+
+const storageError = (err) => {
+  const e = new Error(`对象存储请求失败：${err.message || err.name}`)
+  e.name = 'StorageError'
+  e.cause = err
+  e.status = err?.$metadata?.httpStatusCode || 0
+  return e
+}
+
+/**
+ * 老版本 MinIO（2022-01 这类）对 PutBucketLifecycle* 强制要求 Content-MD5，
+ * 而 AWS SDK v3 早已不再自动计算（当年因为 FIPS 环境下的兼容问题去掉了）。
+ * 不补这个头就会 400 `MissingContentMD5`。
+ *
+ * 命令级 middleware：只影响这一条请求，不污染其它调用。
+ */
+function withContentMd5(command) {
+  command.middlewareStack.add(
+    (next) => async (args) => {
+      const request = args.request
+      if (request?.body && !request.headers?.['Content-MD5']) {
+        const buf =
+          typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : Buffer.from(request.body)
+        request.headers = request.headers || {}
+        request.headers['Content-MD5'] = crypto.createHash('md5').update(buf).digest('base64')
+      }
+      return next(args)
+    },
+    { step: 'build', name: 'contentMd5' },
+  )
+  return command
 }
 
 export function createObjectStore(cfg) {
@@ -51,21 +119,14 @@ export function createObjectStore(cfg) {
   const stripKey = (key) =>
     prefix && String(key).startsWith(`${prefix}/`) ? String(key).slice(prefix.length + 1) : String(key)
 
-  /** 包装一层：非 404 的异常统统转成 502 语义 */
+  /** 包装一层：区分「桶没了（502）」与「对象没了（404）」 */
   async function run(fn) {
     try {
       return await fn()
     } catch (err) {
-      if (isNotFound(err)) {
-        const e = new Error('对象不存在')
-        e.name = 'ObjectNotFound'
-        throw e
-      }
-      const e = new Error(`对象存储请求失败：${err.message || err.name}`)
-      e.name = 'StorageError'
-      e.cause = err
-      e.status = err?.$metadata?.httpStatusCode || 0
-      throw e
+      if (isNoSuchBucket(err)) throw storageError(err)
+      if (isNoSuchKey(err)) throw notFoundError()
+      throw storageError(err)
     }
   }
 
@@ -73,11 +134,117 @@ export function createObjectStore(cfg) {
     bucket,
     joinKey,
 
-    /** 探测桶可用性（启动自检 / 健康检查） */
+    /** 探测桶是否存在。不存在返回 false，不做 run() 的 404 翻译。 */
     async headBucket() {
-      // HeadBucket 没单独 import：用一个代价极小的 ListObjectsV2 代替，语义等价
-      await run(() => client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 1 })))
-      return true
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: bucket }))
+        return true
+      } catch (err) {
+        const status = err?.$metadata?.httpStatusCode
+        if (status === 404 || err?.name === 'NotFound') return false
+        throw storageError(err)
+      }
+    },
+
+    /**
+     * 保证桶可用：不存在就建（默认私有），并配好「中断分片自动清理」的生命周期规则。
+     *
+     * 幂等，可重复调用。并发启动时 CreateBucket 可能撞 409，视为成功。
+     *
+     * @param {{ autoCreate?: boolean, abortIncompleteDays?: number }} options
+     * @returns {{ exists: boolean, created: boolean, lifecycle: 'ok'|'skipped'|'unsupported', publicRead: boolean }}
+     */
+    async ensureBucket({ autoCreate = true, abortIncompleteDays = 1 } = {}) {
+      let exists = await this.headBucket()
+
+      if (!exists && !autoCreate) {
+        throw bucketMissingError()
+      }
+
+      let created = false
+      if (!exists) {
+        try {
+          // 不传 ACL / Policy —— S3 与 MinIO 新建桶默认就是私有
+          await client.send(new CreateBucketCommand({ Bucket: bucket }))
+          created = true
+        } catch (err) {
+          const code = err?.Code || err?.name
+          // BucketAlreadyOwnedByYou：另一个实例刚建好，按成功处理
+          if (code !== 'BucketAlreadyOwnedByYou' && code !== 'BucketAlreadyExists') {
+            throw storageError(err)
+          }
+        }
+      }
+
+      let lifecycle = 'ok'
+      let lifecycleError = ''
+      if (abortIncompleteDays > 0) {
+        try {
+          await client.send(
+            withContentMd5(
+              new PutBucketLifecycleConfigurationCommand({
+                Bucket: bucket,
+                LifecycleConfiguration: {
+                  Rules: [
+                    {
+                      ID: 'abort-incomplete-multipart',
+                      Status: 'Enabled',
+                      Filter: { Prefix: 'deps/' },
+                      AbortIncompleteMultipartUpload: {
+                        DaysAfterInitiation: abortIncompleteDays,
+                      },
+                    },
+                  ],
+                },
+              }),
+            ),
+          )
+        } catch (err) {
+          /**
+           * 两种失败要分开：
+           *   403 —— 凭据没有 PutBucketLifecycleConfiguration 权限
+           *   其它 —— 老版本 MinIO 的 lifecycle schema 不认 AbortIncompleteMultipartUpload
+           *           （实测 RELEASE.2022-01-04 直接 400 InvalidRequest，
+           *            但同一份规则里的 Expiration 是能通过的）
+           * 都不影响主流程：中断分片还有 Hub 侧的会话 TTL 兜底。
+           */
+          lifecycle = err?.$metadata?.httpStatusCode === 403 ? 'forbidden' : 'unsupported'
+          lifecycleError = err?.message || err?.name || ''
+        }
+      }
+
+      return {
+        exists,
+        created,
+        lifecycle,
+        lifecycleError,
+        publicRead: await this.bucketAllowsAnonymousRead(),
+      }
+    },
+
+    /**
+     * 桶策略是否允许匿名读。
+     * 注意：这只查 bucket policy，查不到 ACL / 前提是没人在桶上挂匿名读。
+     * 查不到策略（NoSuchBucketPolicy）说明是私有，返回 false。
+     */
+    async bucketAllowsAnonymousRead() {
+      try {
+        const res = await client.send(new GetBucketPolicyCommand({ Bucket: bucket }))
+        const policy = JSON.parse(res.Policy || '{}')
+        return (policy.Statement || []).some((s) => {
+          if (s.Effect !== 'Allow') return false
+          const principal = s.Principal
+          const anyone =
+            principal === '*' ||
+            (principal && principal.AWS === '*') ||
+            (Array.isArray(principal?.AWS) && principal.AWS.includes('*'))
+          if (!anyone) return false
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action]
+          return actions.some((a) => String(a) === 's3:*' || String(a) === '*' || /s3:GetObject/i.test(String(a)))
+        })
+      } catch {
+        return false
+      }
     },
 
     /**
@@ -266,8 +433,9 @@ export function createObjectStore(cfg) {
           new AbortMultipartUploadCommand({ Bucket: bucket, Key: joinKey(key), UploadId: uploadId }),
         )
       } catch (err) {
-        // 已经完成 / 已被清理的分片，Abort 会 404，视为成功
-        if (!isNotFound(err) && err?.name !== 'NoSuchUpload') throw err
+        // 已经完成 / 已被清理的分片，Abort 会 404（NoSuchUpload），视为成功
+        const code = err?.Code || err?.name
+        if (code !== 'NoSuchUpload' && code !== 'NoSuchKey' && code !== 'NotFound') throw err
       }
       return true
     },
