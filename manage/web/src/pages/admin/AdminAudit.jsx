@@ -12,7 +12,6 @@ const FILTERS = [
   { key: 'enable', label: '生效' },
   { key: 'take-down', label: '下架' },
   { key: 'delete', label: '删除' },
-  { key: 'download', label: '下载' },
 ]
 
 /**
@@ -27,7 +26,6 @@ const ACTION_GROUPS = {
   enable: ['enable', 'dep-enable', 'dep-enable-version'],
   'take-down': ['take-down', 'dep-take-down'],
   delete: ['delete', 'dep-delete', 'dep-delete-version'],
-  download: ['download'],
 }
 
 export default function AdminAudit() {
@@ -168,7 +166,7 @@ export default function AdminAudit() {
 
       <p className="admin-note">
         所有写操作都记进 audit.json：主体 / 包名 / 版本 / sha256 / 大小 / 结果。
-        写操作在落盘成功后记账，失败与幂等空操作不留痕；下载审计在流式结束后异步写入，不阻塞返回流。
+        写操作在落盘成功后记账，失败与幂等空操作不留痕。下载既不写审计，也不做计数。
       </p>
     </div>
   )

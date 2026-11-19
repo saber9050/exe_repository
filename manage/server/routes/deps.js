@@ -6,7 +6,6 @@
  */
 import { HttpError } from '../lib/http-error.js'
 import { DepStore } from '../lib/dep/store.js'
-import { createDepCounter } from '../lib/dep/counter.js'
 import { createDepGiteaDriver } from '../lib/dep/storage.js'
 import {
   CATEGORIES,
@@ -43,10 +42,8 @@ export function mountDepRoutes(app, { config, gitea, requireAdmin, audit }) {
     },
   })
 
-  const counter = createDepCounter({ dataDir: config.depDataDir })
   const store = new DepStore({
     driver,
-    counter,
     maxFileBytes: config.depMaxFileBytes,
     defaultActor: config.adminName,
     // 与插件库共用一份 audit.json，管理端「审计」页一次看完两类操作
@@ -353,5 +350,5 @@ export function mountDepRoutes(app, { config, gitea, requireAdmin, audit }) {
     }),
   )
 
-  return { store, driver, counter }
+  return { store, driver }
 }

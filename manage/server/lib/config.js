@@ -70,9 +70,8 @@ export const config = {
 
   /* ---------------- 依赖库 ---------------- */
 
-  // 只走 Gitea：manifest 写仓库，制品写 generic registry，不落本地磁盘
-  // 仅下载计数（state.json）落本地，丢几秒无所谓
-  depDataDir: path.resolve(ROOT, process.env.DEP_DATA_DIR || 'data/deps'),
+  // 只走 Gitea：manifest 写仓库，制品写 generic registry。
+  // 本地不落任何状态（下载计数已移除）。
   // 单文件上限，默认 2 GiB
   depMaxFileBytes: num(process.env.DEP_MAX_FILE_BYTES, 2 * 1024 * 1024 * 1024),
   // manifest 在仓库里的目录

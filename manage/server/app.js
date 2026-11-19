@@ -212,8 +212,5 @@ export function createManageApp(options = {}) {
     dep,
     gitea,
     init,
-    async dispose() {
-      await dep.counter.flush().catch(() => {})
-    },
   }
 }

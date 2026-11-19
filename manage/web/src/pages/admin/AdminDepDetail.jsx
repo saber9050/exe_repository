@@ -345,7 +345,7 @@ export default function AdminDepDetail() {
             <span className="dephead__label">当前版本</span>
             <strong className="mono dephead__version">{asset.currentVersion || '—'}</strong>
             <span className="muted">
-              {asset.versions.length} 个版本 · {formatBytes(asset.size)} · 下载 {asset.downloads}
+              {asset.versions.length} 个版本 · {formatBytes(asset.size)}
             </span>
           </div>
         </div>

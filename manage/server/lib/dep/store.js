@@ -26,9 +26,8 @@ import {
 } from './manifest.js'
 
 export class DepStore {
-  constructor({ driver, counter, maxFileBytes, defaultActor, audit }) {
+  constructor({ driver, maxFileBytes, defaultActor, audit }) {
     this.driver = driver
-    this.counter = counter
     this.maxFileBytes = maxFileBytes
     this.defaultActor = defaultActor || '平台管理员'
     // 与插件库共用同一个 AuditLog 实例（同一份 audit.json、同一条写队列）
@@ -97,16 +96,14 @@ export class DepStore {
 
   async list() {
     await this.ensureIndex()
-    const counts = await this.counter.counts()
     return [...this.index.values()]
-      .map((m) => ({ ...summarize(m), downloads: Number(counts[m.code] || 0) }))
+      .map((m) => summarize(m))
       .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
   }
 
   async overview() {
     await this.ensureIndex()
     const manifests = [...this.index.values()]
-    const counts = await this.counter.counts()
     const weekAgo = Date.now() - 7 * 24 * 3600 * 1000
 
     return {
@@ -123,7 +120,6 @@ export class DepStore {
         (n, m) => n + (m.versions || []).reduce((s, v) => s + versionSize(v), 0),
         0,
       ),
-      downloads: Object.values(counts).reduce((n, v) => n + Number(v || 0), 0),
       weekUpdated: manifests.filter((m) => new Date(m.updatedAt).getTime() > weekAgo).length,
       storageDriver: this.driver.name,
       recentUpdates: [...manifests]
@@ -546,10 +542,8 @@ export class DepStore {
   async detail(code) {
     const manifest = await this.getManifest(assertCode(code))
     if (!manifest) throw new HttpError(404, '资产不存在')
-    const counts = await this.counter.counts()
     return {
       ...summarize(manifest),
-      downloads: Number(counts[manifest.code] || 0),
       versions: sortVersions(manifest.versions || []).map((v) => ({
         version: v.version,
         state: v.state,
@@ -582,7 +576,6 @@ export class DepStore {
     const file = row.files?.[0]
     if (!file) throw new HttpError(404, '该版本没有制品文件')
 
-    this.counter.bumpDownload(manifest.code).catch(() => {})
     return { manifest, version: row, file }
   }
 
@@ -603,7 +596,6 @@ export class DepStore {
       )
     }
 
-    const counts = await this.counter.counts()
     return items
       .map((m) => {
         const current = (m.versions || []).find((v) => v.version === m.currentVersion)
@@ -619,7 +611,6 @@ export class DepStore {
           sha256: current?.files?.[0]?.sha256 || '',
           fileName: current?.files?.[0]?.name || '',
           updatedAt: m.updatedAt,
-          downloads: Number(counts[m.code] || 0),
         }
       })
       .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))

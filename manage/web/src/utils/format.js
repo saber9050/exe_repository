@@ -83,8 +83,9 @@ export const AUDIT_ACTION_META = {
   enable: { label: '生效', tone: 'ok' },
   'take-down': { label: '下架', tone: 'neutral' },
   register: { label: '登记插件', tone: 'purple' },
-  download: { label: '下载', tone: 'teal' },
   delete: { label: '删除插件', tone: 'danger' },
+
+  // 依赖库动作。下载不产生审计记录，只有计数，所以这里没有 download。
 
   // 依赖库：与插件库共用同一份 audit.json，action 用 dep- 前缀区分
   'dep-register': { label: '登记资产', tone: 'purple' },

@@ -65,8 +65,7 @@ server.on('error', (err) => {
   process.exit(1)
 })
 
-async function shutdown() {
-  await manage.dispose()
+function shutdown() {
   server.close(() => process.exit(0))
 }
 process.on('SIGINT', shutdown)
