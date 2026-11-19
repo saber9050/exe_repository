@@ -33,8 +33,12 @@ FROM node:22-alpine AS runtime
 
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
+# HOST=0.0.0.0：容器必须监听所有网卡。服务默认只绑 127.0.0.1（本机开发够用），
+# 但容器里那样写的话，-p 从 eth0 转发进来的流量进不去 —— 表现是容器 healthy、
+# 容器内 curl 通，宿主机却连不上。
 ENV NODE_ENV=production \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    HOST=0.0.0.0
 
 WORKDIR /app
 
@@ -45,8 +49,14 @@ RUN npm config set registry "${NPM_REGISTRY}" \
     && npm ci --omit=dev \
     && npm cache clean --force
 
-COPY server/ ./
+# 注意目标要写全 ./server/：写成 ./ 会把 index.js、lib/、routes/ 摊到 /app 根，
+# 而 CMD 找的是 /app/server/index.js，容器会一直重启并报 MODULE_NOT_FOUND
+COPY server/ ./server/
 COPY --from=web-builder /build/dist ./web/dist
+
+# 构建期自检：布局不对就在这里失败，而不是等到容器起不来、日志刷屏才发现
+RUN test -f server/index.js && test -f web/dist/index.html \
+    || (echo "镜像布局不对：缺 server/index.js 或 web/dist/index.html" && exit 1)
 
 EXPOSE 8788
 

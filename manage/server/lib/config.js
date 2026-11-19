@@ -49,6 +49,12 @@ const MiB = 1024 * 1024
 export const config = {
   // 下载端 portal 默认 8787，管理端错开
   port: num(process.env.PORT, 8788),
+  /**
+   * 监听地址。默认只绑回环，本机开发够用、也不至于把管理端暴露到局域网。
+   * 容器里必须改成 0.0.0.0：-p 的流量是从容器 eth0 进来的，
+   * 只监听 127.0.0.1 时外部连不上（但容器内 curl 通、healthcheck 也绿，很容易误判）。
+   */
+  host: process.env.HOST || '127.0.0.1',
   distDir: path.resolve(ROOT, '../web/dist'),
 
   // 管理端账号（平台账号，与对象存储的 key 无关；S3 凭据只存在于服务端）

@@ -26,9 +26,9 @@ const { app } = manage
 
 const indexHtml = `${config.distDir}/index.html`
 
-const server = app.listen(config.port, '127.0.0.1', async () => {
-  const local = `http://127.0.0.1:${config.port}`
-  console.log(`[manage] 已启动 ${local}`)
+const server = app.listen(config.port, config.host, async () => {
+  const scope = config.host === '0.0.0.0' ? '（所有网卡）' : '（仅本机）'
+  console.log(`[manage] 已启动 http://${config.host}:${config.port}${scope}`)
   console.log(
     `[manage] 制品库 MinIO ${config.minio.endpoint}:${config.minio.port}/${config.minio.bucket}` +
       `（分片 ${Math.round(config.depPartSize / 1024 / 1024)} MiB/片，上限 ${config.depMaxParts} 片）`,
