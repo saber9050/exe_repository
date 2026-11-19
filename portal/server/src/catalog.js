@@ -9,7 +9,7 @@
  *   资产 status === 'enabled' 才展示；版本 state === 'enabled' 才可下载。
  */
 
-import { listManifests, getManifest } from './gitea.js';
+import { listManifests, getManifest } from './minio.js';
 
 /** 平台口径。key 与管理端 OS_LIST 一致。 */
 export const PLATFORMS = {

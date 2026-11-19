@@ -5,7 +5,7 @@
  *   GET /client/deps/catalog?os=&arch=&q=
  *   GET /client/deps/:code/versions/:version/download
  * 生产环境这两个接口落在 Hub 的 DependencyModule 里，网关 /client/** 挂 jwt-auth；
- * 本地这层只负责把 Gitea generic registry 包成同样的形状，前端代码将来不用改。
+ * 本地这层只负责把 MinIO 对象存储包成同样的形状，前端代码将来不用改。
  */
 
 import express from 'express';
@@ -14,7 +14,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { getCatalog, findVersion } from './catalog.js';
-import { openArtifact, giteaConfig } from './gitea.js';
+import { openArtifact, storageConfig } from './minio.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -27,7 +27,7 @@ app.disable('x-powered-by');
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 app.get('/healthz', (_req, res) => {
-  res.json({ ok: true, gitea: giteaConfig });
+  res.json({ ok: true, storage: storageConfig });
 });
 
 app.get(
@@ -141,5 +141,5 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`[dep-portal] http://localhost:${PORT}`);
-  console.log(`[dep-portal] gitea=${giteaConfig.base} owner=${giteaConfig.owner} auth=${giteaConfig.authenticated}`);
+  console.log(`[dep-portal] storage=${storageConfig.driver} @ ${storageConfig.base} bucket=${storageConfig.bucket} auth=${storageConfig.authenticated}`);
 });

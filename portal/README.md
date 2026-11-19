@@ -1,7 +1,13 @@
 # 依赖库 · 客户端下载页
 
-公共资源中心「依赖库」模块的客户端下载页。展示 Gitea generic registry 里的制品，
+公共资源中心「依赖库」模块的客户端下载页。读取存储后端的资产清单，
 按 **平台 / 架构 / 分类** 组织，点击即下载。
+
+数据全部来自 MinIO：`meta/deps/{code}/manifest.json` 提供清单，
+`deps/{code}/{version}/{storageName}` 提供制品字节。
+
+`MINIO_ENDPOINT` / `MINIO_BUCKET` / `MINIO_PREFIX` 必须与 `manage/server/.env`
+完全一致，否则表现不是报错而是**目录突然变空**。
 
 前端是纯静态页面（HTML + CSS + 原生 JS），**没有框架、没有构建步骤**，改完文件刷新即生效。
 这样 Windows 7 上能装的旧版 Chrome / Edge 也能正常打开。
@@ -13,7 +19,7 @@ portal/
 ├── server/          门面服务（Express，唯一需要装依赖的部分）
 │   ├── src/index.js    /client/deps 接口 + 托管前端静态文件
 │   ├── src/catalog.js  制品目录：拉包、识别平台与架构、组装目录项
-│   ├── src/gitea.js    Gitea API 封装（列包、取文件、带 Range 转发字节）
+│   ├── src/minio.js    MinIO 只读封装（读 manifest、GetObject 带 Range）
 │   └── .env.example    配置模板
 ├── web/             前端静态资源（无构建）
 │   ├── index.html     页面骨架
@@ -46,7 +52,7 @@ npm install
 
 # 2. 配置（首次运行才需要）
 cp .env.example .env
-# 编辑 .env，填 GITEA_TOKEN，获取方式见 .env.example 里的注释
+# 编辑 .env，填 MINIO_ACCESS_KEY / MINIO_SECRET_KEY（只读凭据）
 
 # 3. 启动
 npm start
@@ -61,22 +67,23 @@ npm start
 
 | 变量 | 说明 |
 | --- | --- |
-| `GITEA_BASE_URL` | Gitea 地址，如 `http://47.103.196.145:3000` |
-| `GITEA_OWNER` | generic registry 的 owner，组织名或用户名 |
-| `GITEA_TOKEN` | 访问令牌，**只需要 `read:package` 权限** |
+| `MINIO_ENDPOINT` | MinIO 主机名，**不要带 `http://`** |
+| `MINIO_PORT` | 默认 9000 |
+| `MINIO_USE_SSL` | 内网 http 填 `false` |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | **只读**凭据（只需 `s3:GetObject` 权限） |
+| `MINIO_BUCKET` | 默认 `dep-artifacts`，要与 manage 一致 |
+| `MINIO_PREFIX` | 桶内前缀，要与 manage 一致 |
 | `PORT` | 门面端口，默认 8787 |
 
-令牌获取（二选一，只在生成时显示一次）：
+只读凭据建议单独建（MinIO 控制台 → Access Keys，或 `mc admin user add`），
+策略只给：
 
-```bash
-# 网页：登录 → 头像 → 设置 → 应用 → 生成新令牌，只勾 read:package
-
-# 命令行
-docker exec -u git gitea gitea admin user generate-access-token \
-  --username <用户名> --token-name dep-portal-read --scopes read:package --raw
+```
+s3:GetObject on arn:aws:s3:::dep-artifacts/deps/*
+s3:GetObject on arn:aws:s3:::dep-artifacts/meta/deps/*
 ```
 
-真实令牌只写进 `.env`（已在 `.gitignore` 中）。`.env.example` 会进版本库，保持空值。
+真实密钥只写进 `.env`（已在 `.gitignore` 中）。`.env.example` 会进版本库，保持空值。
 
 ## Docker 部署（四步）
 
@@ -109,9 +116,11 @@ docker run -d \
   -p 8888:8787 \
   --add-host host.docker.internal:host-gateway \
   --log-opt max-size=10m --log-opt max-file=3 \
-  -e GITEA_BASE_URL=http://47.103.196.145:3000 \
-  -e GITEA_OWNER=zxp \
-  -e GITEA_TOKEN=<read:package + read:repository 的令牌> \
+  -e MINIO_ENDPOINT=172.24.155.130 \
+  -e MINIO_PORT=9000 \
+  -e MINIO_ACCESS_KEY=<只读凭据> \
+  -e MINIO_SECRET_KEY=<只读密钥> \
+  -e MINIO_BUCKET=dep-artifacts \
   dep-portal:latest
 ```
 
@@ -121,12 +130,11 @@ docker run -d \
 
 | 参数 | 不写时的默认值 | 说明 |
 | --- | --- | --- |
-| `-e GITEA_TOKEN` | 空 | **必须给**，空的话页面能开但列表永远是空的 |
-| `-e GITEA_BASE_URL` | `http://47.103.196.145:3000` | Gitea 地址 |
-| `-e GITEA_OWNER` | `zxp` | 仓库 owner |
-| `-e GITEA_REPO` | `my-dependency` | 一般不用写 |
-| `-e GITEA_DEPS_DIR` | `deps` | 一般不用写 |
-| `-e GITEA_BRANCH` | `main` | 一般不用写 |
+| `-e MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | 空 | **必须给**，空的话页面能开但列表永远空 |
+| `-e MINIO_ENDPOINT` | `127.0.0.1` | 容器里填 127.0.0.1 指向容器自己，要填宿主/内网地址 |
+| `-e MINIO_PORT` | `9000` | |
+| `-e MINIO_BUCKET` | `dep-artifacts` | 与 manage 保持一致 |
+| `-e MINIO_PREFIX` | 空 | 与 manage 保持一致 |
 | `-e PORT` | `8787` | **别改**，改了 `-p 8888:8787` 就对不上 |
 
 端口、重启策略、日志上限都写在启动命令里，健康检查写在镜像里，没有任何外部文件。
@@ -139,9 +147,9 @@ docker run -d \
 ### 令牌别留在命令历史里
 
 ```bash
-read -rsp 'GITEA_TOKEN: ' GITEA_TOKEN; echo
-export GITEA_TOKEN
-docker run -d ... -e GITEA_TOKEN ... dep-portal:latest    # 只写变量名、不带 =value
+read -rsp 'MINIO_SECRET_KEY: ' MINIO_SECRET_KEY; echo
+export MINIO_SECRET_KEY
+docker run -d ... -e MINIO_SECRET_KEY ... dep-portal:latest    # 只写变量名、不带 =value
 ```
 
 必须 `export`：`-e 变量名` 这种写法是 docker 从自己的进程环境里取值，只 `read` 不 `export`
@@ -166,14 +174,18 @@ docker exec dep-portal ls /app/web       # 看前端有没有打进镜像
 
 ## 制品怎么放
 
-往 Gitea 上传 generic 包，**平台和架构靠文件名识别**：
+制品通过管理端上传（`manage/` 的「上传版本」），不要手工往桶里塞对象 ——
+桶里对象的元信息必须有对应的 `manifest.json` 才能被本页面识别。
 
-```bash
-curl -X PUT \
-  -H "Authorization: token <write:package 的令牌>" \
-  --data-binary @demo-client-win10-x64.exe \
-  http://<gitea>/api/packages/<owner>/generic/demo-client/1.0.0/demo-client-win10-x64.exe
+上传后的对象布局：
+
 ```
+deps/{code}/{version}/{storageName}.dat      ← 字节
+meta/deps/{code}/manifest.json               ← 名称、平台、版本、状态、sha256
+```
+
+本页面读 manifest 里的 `os` / `arch` 字段决定展示在哪个平台下，
+不看文件名。
 
 | 文件名里的标识 | 识别结果 |
 | --- | --- |
@@ -249,7 +261,7 @@ GET /client/deps/{code}/versions/{version}/download
 ## 常见问题
 
 **页面能打开但没有制品**
-按顺序排查：`GITEA_OWNER` 是否写对 → `GITEA_TOKEN` 是否有 `read:package` →
+按顺序排查：`MINIO_BUCKET` / `MINIO_PREFIX` 是否与 manage 一致 → 只读凭据是否有效 →
 包里是否上传了能识别出平台的制品（文件名不带平台标识的 `.zip` 会被忽略）。
 
 **`npm start` 报 `fetch is not defined` 或 `--env-file-if-exists` 不认识**
@@ -284,13 +296,14 @@ Node 版本太低，`nvm use 22.22.2` 再跑。
 参数没注入进去或注入错了。先看容器里实际拿到什么：
 
 ```bash
-docker inspect dep-portal --format '{{json .Config.Env}}' | tr ',' '\n' | grep GITEA
+docker inspect dep-portal --format '{{json .Config.Env}}' | tr ',' '\n' | grep MINIO
 docker exec dep-portal sh -c 'wget -qO- http://127.0.0.1:8787/healthz'
 ```
 
-`authenticated` 为 `false` → `-e GITEA_TOKEN` 没给或给了空值；owner 写错 → 日志里会有 `Gitea 404`。
-Gitea 就在同一台宿主机上、且 3000 没对公网开放时，`-e GITEA_BASE_URL=http://host.docker.internal:3000`
-（启动命令里已经加了 `--add-host host.docker.internal:host-gateway`）。
+`authenticated` 为 `false` → 密钥没给或给了空值；endpoint 写错 → 日志里会有连接错误。
+MinIO 跑在宿主机的 WSL/本机时，容器里的 `127.0.0.1` 指向容器自己，
+要填宿主机内网地址（启动命令里已经加了 `--add-host host.docker.internal:host-gateway`，
+也可以直接用 `host.docker.internal`）。
 
 **Docker：本地构建卡在 `npm ci`**
 `package-lock.json` 里的 `resolved` 已经指向 `registry.npmmirror.com`，正常几十秒装完。
