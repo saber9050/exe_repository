@@ -4,12 +4,15 @@ node_modules/
 # 前端构建产物（由 npm run build 生成，服务端直接托管）
 web/dist/
 
-# 本地配置（含 Gitea 令牌）
+# 本地配置（含 MinIO 密钥、管理员密码、会话密钥）
 server/.env
 .env
 
 # 下载计数等本地数据
 server/data/
+
+# 镜像打包产物（docker save 的产物，动辄上百 MB）
+*.tar.gz
 
 # 杂项
 *.log

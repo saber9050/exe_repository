@@ -75,6 +75,167 @@ cd ../server && npm install && npm start        # 服务端直接托管 web/dist
 `MINIO_ENDPOINT` / `MINIO_BUCKET` / `MINIO_PREFIX` 两边必须完全一致，
 否则下载页会变空（不报错，更难发现）。
 
+## Docker 部署（四步）
+
+镜像里**不带任何配置**，所有参数都在启动命令里用 `-e` 注入。传完镜像后，服务器上不需要任何
+配置文件，也不依赖本地环境。
+
+和 `portal/` 的关系：两个容器必须指向**同一个 MinIO 桶**，但用**不同凭据** ——
+manage 读写、portal 只读。**先启动 manage**：它会自动建桶；portal 先起会读不到桶。
+
+前置：服务器装好 docker（20.10+），安全组放行 8889。
+
+**本地（在 `manage/` 目录下）**
+
+```bash
+# 1. 构建。要装两套依赖并在镜像里构建前端，首次约 2~4 分钟
+docker build -t dep-manage:latest .
+
+# 2. 打包
+docker save dep-manage:latest | gzip -9 > dep-manage.tar.gz
+```
+
+**服务器（`dep-manage.tar.gz` 放上去之后）**
+
+```bash
+# 3. 加载包
+gunzip -c dep-manage.tar.gz | docker load
+
+# 4. 启动（先删旧容器，再带参数重建）
+docker rm -f dep-manage 2>/dev/null
+docker run -d \
+  --name dep-manage \
+  --restart unless-stopped \
+  -p 8889:8788 \
+  --add-host host.docker.internal:host-gateway \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  -e ADMIN_USER=admin \
+  -e ADMIN_PASSWORD='<强密码>' \
+  -e SESSION_SECRET='<32 字节 hex，见下>' \
+  -e MINIO_ENDPOINT=host.docker.internal \
+  -e MINIO_PORT=9000 \
+  -e MINIO_ACCESS_KEY='<读写凭据>' \
+  -e MINIO_SECRET_KEY='<读写密钥>' \
+  -e MINIO_BUCKET=dep-artifacts \
+  dep-manage:latest
+```
+
+四步跑完，打开 `http://47.103.196.145:8889`。
+
+### 参数说明
+
+必须给的三项，缺了会出问题：
+
+| 参数 | 为什么必须 | 不填的后果 |
+| --- | --- | --- |
+| `ADMIN_PASSWORD` | 管理端登录密码 | 回落到代码里的 `dsh@2026`，等于没密码 |
+| `SESSION_SECRET` | 给登录 token 签名 | 回落到公开的 `dev-only-change-me`，拿到这个值就能伪造管理员 token |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | 读写对象存储 | 启动日志报「对象存储初始化失败」，所有接口 502 |
+
+其余参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `ADMIN_USER` | `admin` | 登录账号 |
+| `ADMIN_NAME` | `平台管理员` | 审计里显示的操作人 |
+| `SESSION_TTL_SECONDS` | `43200` | 登录态有效期（12 小时） |
+| `MINIO_ENDPOINT` | `127.0.0.1` | 容器里填 `127.0.0.1` 指向容器自己，见下节 |
+| `MINIO_PORT` | `9000` | |
+| `MINIO_USE_SSL` | `false` | 内网 http 保持 false |
+| `MINIO_BUCKET` | `dep-artifacts` | 与 portal 必须一致 |
+| `MINIO_PREFIX` | 空 | 与 portal 必须一致，不一致会变成空目录 |
+| `MINIO_AUTO_CREATE_BUCKET` | `true` | 桶不存在时自动建（默认私有） |
+| `DEP_PART_SIZE` | `8388608` | 分片大小，**不能低于 5 MiB**，否则合并会被 MinIO 拒绝 |
+| `DEP_MAX_FILE_BYTES` | `21474836480` | 单文件上限，默认 20 GiB |
+| `PORT` | `8788` | **别改**，改了 `-p 8889:8788` 就对不上 |
+
+### MINIO_ENDPOINT 怎么填
+
+容器里的 `127.0.0.1` 是容器自己，不是宿主机。三种情况：
+
+| MinIO 在哪 | 填什么 | 备注 |
+| --- | --- | --- |
+| 同一台宿主机（docker） | `host.docker.internal` | 启动命令已加 `--add-host`，Linux 也能解析 |
+| 同一台宿主机（裸装进程） | `host.docker.internal` | 同上 |
+| 另一台机器 / 云上独立实例 | 内网 IP，如 `172.24.0.5` | 别填公网 IP，走内网免流量费也更快 |
+
+也可以用 `--network host` 让容器直用宿主网络栈，那时 `MINIO_ENDPOINT=127.0.0.1` 就对，
+但 `-p` 会失效（端口直接占宿主的 8788）。
+
+### 凭据权限
+
+manage 要读写，别把 portal 那个只读凭据拿来用：
+
+```
+s3:*  on arn:aws:s3:::dep-artifacts/*        必需：Get/Put/Delete/List + 各类 multipart
+s3:CreateBucket  on arn:aws:s3:::dep-artifacts   自动建桶需要，关掉开关后可去掉
+```
+
+生命周期规则（`AbortIncompleteMultipartUpload`）需要 `s3:PutBucketLifecycleConfiguration`。
+给不了也不影响上传下载，只是中断的分片要靠服务端 TTL 兜底。
+
+### SESSION_SECRET 怎么来
+
+不是去哪里申请，是随便生成一串随机值：
+
+```bash
+openssl rand -hex 32
+# 或
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+改掉这个值，所有已登录会话立即失效（要重新登录）。
+
+### 改参数 / 更新版本
+
+改哪一行就重跑第 4 步。`docker rm -f` 已经把旧容器删了，新容器一定带新参数，
+不存在「改了没生效」的情况。只换端口就改 `-p 8889:8788` 的左边。
+
+### 密码别留在命令历史里
+
+```bash
+read -rsp 'ADMIN_PASSWORD: ' ADMIN_PASSWORD; echo
+read -rsp 'MINIO_SECRET_KEY: ' MINIO_SECRET_KEY; echo
+export ADMIN_PASSWORD MINIO_SECRET_KEY
+docker run -d ... -e ADMIN_PASSWORD -e MINIO_SECRET_KEY ... dep-manage:latest    # 只写变量名、不带 =value
+```
+
+必须 `export`：`-e 变量名` 这种写法是 docker 从自己的进程环境里取值，只 `read` 不 `export`
+会注入空值，症状和「没配置一样」。
+
+`-e` 的代价是 `docker inspect dep-manage` 里能看到明文，这个没法避开。
+
+### 和下载页一起部署
+
+```bash
+# 1. 先起 manage —— 它会建桶、初始化目录
+docker run -d --name dep-manage ... dep-manage:latest
+
+# 2. 确认桶正常（日志里应有「对象存储可用」）
+docker logs --tail=20 dep-manage
+
+# 3. 再起 portal，指向同一个桶
+docker run -d --name dep-portal ... dep-portal:latest
+```
+
+顺序反了不会报错，只是下载页目录为空 —— 因为桶还没建出来。
+
+### 服务器常用命令
+
+```bash
+docker logs -f --tail=100 dep-manage          # 日志
+docker logs --tail=50 dep-manage | grep -E "桶|对象存储|分片"   # 看存储自检结果
+docker restart dep-manage                     # 重启
+docker rm -f dep-manage                       # 停止并删除容器
+docker ps --filter name=dep-manage            # 状态（含 healthy）
+docker exec dep-manage ls /app/web/dist       # 看前端有没有打进镜像
+```
+
+### 回滚
+
+打包时顺手留一份归档 `cp dep-manage.tar.gz dep-manage-20261119.tar.gz`，
+回滚就 `gunzip -c 那份 | docker load`，再跑第 4 步。
+
 ## 接口
 
 管理端（需登录，`Authorization: Bearer <token>`）：
