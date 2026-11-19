@@ -337,7 +337,7 @@ export default function AdminDeps() {
             <>
               会删除 <strong>{delTarget.displayName}</strong>（<code className="mono">{delTarget.code}</code>）
               及其全部 <strong>{delTarget.versionCount ?? delTarget.versions?.length ?? 0}</strong> 个版本的制品
-              （共 {formatBytes(delTarget.size)}），Gitea 里的 manifest 与字节一并清掉。
+              （共 {formatBytes(delTarget.size)}），存储里的 manifest 与字节一并清掉。
               下载页会立即不再返回它，<strong>不可恢复</strong>。
               <br />
               请逐字输入资产标识：

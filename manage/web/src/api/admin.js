@@ -40,7 +40,7 @@ export function takeDown(name) {
 }
 
 /**
- * 彻底删除：清单、说明与全部版本制品一起从 Gitea 删掉，不可恢复。
+ * 彻底删除：清单、说明与全部版本制品一起从对象存储删掉，不可恢复。
  * confirm 必须原样传包名，服务端会逐字符比对后才会动手。
  */
 export function deletePlugin(name, confirm) {

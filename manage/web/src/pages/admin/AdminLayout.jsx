@@ -95,8 +95,8 @@ export default function AdminLayout() {
           </div>
           <div className="admin__topbar-right">
             {store && (
-              <span className="env-chip mono" title="制品库（Gitea）">
-                Gitea · {store.owner}/{store.repo}
+              <span className="env-chip mono" title="制品库（MinIO 对象存储）">
+                MinIO · {store.bucket}
               </span>
             )}
             <span className="admin__env">

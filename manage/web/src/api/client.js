@@ -2,7 +2,7 @@
  * 统一请求层。
  *
  * 所有请求都是同源的：开发期由 Vite 代理到本地服务端，生产期由服务端自己托管，
- * 因此不需要给 Gitea 配 CORS，也不会有任何 Gitea 令牌进入浏览器。
+ * 因此不需要给对象存储配 CORS，也不会有任何 S3 密钥进入浏览器。
  */
 import { readValue, removeValue, writeValue } from '../lib/storage'
 
@@ -111,7 +111,7 @@ export async function request(path, { method = 'GET', query, body, signal, timeo
 
 /**
  * 取二进制（插件包）。
- * 服务端会把 Gitea 的字节流原样转出来，并在响应头里带上 sha256 供前端核对。
+ * 服务端会把对象存储的字节流原样转出来，并在响应头里带上 sha256 供前端核对。
  */
 export async function requestBlob(path, { signal } = {}) {
   let res

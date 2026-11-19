@@ -1,8 +1,8 @@
 /** 依赖库接口：与插件库共用同一套 Bearer 会话与请求层 */
 import { ApiError, getToken, request } from './client'
 
-/** 服务端没返回上限时的兜底值，与 server/lib/config.js 的默认值一致 */
-export const DEP_MAX_BYTES = 2 * 1024 * 1024 * 1024
+/** 服务端没返回上限时的兜底值，与 server/lib/config.js 的 minio 默认值一致 */
+export const DEP_MAX_BYTES = 20 * 1024 * 1024 * 1024
 
 export function fetchDepMeta(signal) {
   return request('/server/deps/meta', { signal })
@@ -73,7 +73,10 @@ export function restoreDep(code) {
 }
 
 /**
- * 上传制品：XHR 裸流 + 进度。
+ * 单请求直传（兼容路径）：XHR 裸流 + 进度。
+ *
+ * 只在文件小于 meta.chunkedThresholdBytes 时用，省掉「创建会话 + 完成」两次往返。
+ * 大文件走 api/upload.js 的分片上传。
  *
  * 试过 fetch + ReadableStream 实现「暂停发送」，在有 HTTP 代理的环境下会
  * 报 net::ERR_ALPN_NEGOTIATION_FAILED（代理隧道对流式请求体协商失败），

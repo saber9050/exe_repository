@@ -236,7 +236,7 @@ export default function AdminDepNew() {
             <dl className="meta-list meta-list--tight">
               <div>
                 <dt>驱动</dt>
-                <dd>Gitea generic registry</dd>
+                <dd>MinIO 对象存储（分片上传）</dd>
               </div>
               <div>
                 <dt>单文件上限</dt>
