@@ -1,0 +1,18 @@
+{
+  "name": "dep-manage-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "依赖库管理端（从 dsh 插件市场分离）：资产登记、制品上传、启停、审计",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.22.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

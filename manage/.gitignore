@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+
+# 前端构建产物（由 npm run build 生成，服务端直接托管）
+web/dist/
+
+# 本地配置（含 Gitea 令牌）
+server/.env
+.env
+
+# 下载计数等本地数据
+server/data/
+
+# 杂项
+*.log
+.DS_Store
+Thumbs.db

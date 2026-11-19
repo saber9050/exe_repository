@@ -1,0 +1,253 @@
+/**
+ * 通用组件样式：空态、提示条、徽章、Toast、侧栏卡片等。
+ *
+ * 这些规则原来和市场页面写在同一张样式表里，依赖库管理端独立后只带走了
+ * tokens / base / admin 三张表，于是 .empty 这类「看起来应该本来就有」的布局
+ * 悄悄丢了 —— 空态不再居中，图标挤到左上角。这里按用到的类名从原表里摘出来，
+ * 不引入任何市场专属的样式（.plugin-card、.market-* 之类都不在）。
+ */
+.env-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--warn-bg);
+  color: #b54708;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid #fedf89;}
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(140deg, #5b7cfa, #2f5cf6);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  flex: none;}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 64px 20px;
+  text-align: center;
+  background: var(--surface);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  margin-top: 20px;}
+
+.empty--compact {
+  padding: 34px 16px;
+  border: 0;
+  background: transparent;
+  margin: 0;}
+
+.empty__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--surface-3);
+  color: var(--ink-3);
+  margin-bottom: 4px;}
+
+.empty--compact .empty__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;}
+
+.empty__title {
+  font-size: 14px;
+  font-weight: 600;}
+
+.empty__desc {
+  max-width: 420px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  line-height: 1.65;}
+
+.empty .btn {
+  margin-top: 8px;}
+
+.alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid;
+  font-size: 13px;
+  margin-top: 16px;}
+
+.alert svg {
+  flex: none;
+  margin-top: 1px;}
+
+.alert strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;}
+
+.alert p {
+  color: inherit;
+  opacity: 0.86;
+  font-size: 12.5px;}
+
+.alert .btn {
+  margin-left: auto;
+  flex: none;}
+
+.alert--error {
+  background: var(--danger-bg);
+  border-color: #fecdca;
+  color: #b42318;}
+
+.alert--sm {
+  padding: 9px 11px;
+  font-size: 12.5px;
+  align-items: center;}
+
+.toast-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 220px;
+  max-width: 380px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  color: var(--ink);
+  pointer-events: auto;
+  animation: fadeUp 0.22s var(--ease);}
+
+.toast svg {
+  flex: none;}
+
+.toast--ok svg {
+  color: var(--ok);}
+
+.toast--error svg {
+  color: var(--danger);}
+
+.toast--info svg {
+  color: var(--brand);}
+
+.toast__close {
+  margin-left: auto;
+  display: inline-flex;
+  border: 0;
+  background: transparent;
+  color: var(--ink-4);
+  padding: 2px;}
+
+.toast__close:hover {
+  color: var(--ink);}
+
+.sha-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;}
+
+.icon-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-4);
+  padding: 3px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  vertical-align: middle;}
+
+.icon-copy:hover {
+  color: var(--brand);
+  background: var(--brand-050);}
+
+.icon-copy.is-done {
+  color: var(--ok);}
+
+.side-card {
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-xs);}
+
+.side-card__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 12px;}
+
+.side-card__head svg {
+  color: var(--ink-4);}
+
+.side-card--install .side-card__head svg {
+  color: var(--brand);}
+
+.side-card__note {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--ink-4);
+  line-height: 1.6;}
+
+.meta-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;}
+
+.meta-list > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;}
+
+.meta-list dt {
+  color: var(--ink-4);
+  flex: none;}
+
+.meta-list dd {
+  margin: 0;
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-align: right;
+  min-width: 0;}
+
+.meta-list dd svg {
+  color: var(--ink-4);}
+
+.meta-list--tight > div {
+  font-size: 11.8px;}
+
+.env-chip {
+    display: none;}
