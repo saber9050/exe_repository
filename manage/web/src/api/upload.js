@@ -33,6 +33,23 @@ const STORAGE_PREFIX = 'dep.upload.'
 const EMIT_INTERVAL_MS = 100
 const MAX_PERCENT = 99
 
+/**
+ * 把「用户取消」与「暂停中断」两个信号合并成一个。
+ * putPart 只接受一个 signal，但暂停时需要能中断其它在传分片。
+ */
+function mergeSignals(a, b) {
+  if (!a) return b
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (a.aborted || b.aborted) {
+    controller.abort()
+    return controller.signal
+  }
+  a.addEventListener('abort', abort, { once: true })
+  b.addEventListener('abort', abort, { once: true })
+  return controller.signal
+}
+
 function authHeaders(extra = {}) {
   const token = getToken()
   return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra }
@@ -273,6 +290,16 @@ export async function uploadDepVersionChunked({
   const inflight = new Map() // partNumber -> 已发送字节
   let lastEmit = 0
 
+  /**
+   * 暂停时用来中断「多余」的在传分片。
+   *
+   * 不加这个的话，3 个 worker 都卡在 await putPart，每个都要等自己那片传完，
+   * 实际等待时间是最慢那片；慢速网络下点暂停要等好几分钟才有反应。
+   * 现在的语义是：谁先传完谁留下，剩下的立刻 abort —— 最多等一片，而不是三片。
+   */
+  const pauseController = new AbortController()
+  const partSignal = mergeSignals(signal, pauseController.signal)
+
   /** 节流上报：XHR 的 progress 触发很密，每帧 setState 会把主线程拖住 */
   const emit = (force = false) => {
     const now = Date.now()
@@ -308,33 +335,48 @@ export async function uploadDepVersionChunked({
       inflight.set(partNumber, 0)
       emit()
 
-      await putPart({
-        code,
-        uploadId,
-        partNumber,
-        blob,
-        signal,
-        onSent: (sent) => {
-          /**
-           * 不能用 max 兜底：重试时旧连接可能已经发到 8 MiB，新连接从 0 开始，
-           * 取 max 会让进度卡在旧值上一整个分片的时长。直接覆盖，允许回退
-           * 最多一个分片（0.4%），比「不动」好判断得多。
-           */
-          inflight.set(partNumber, sent)
-          emit()
-        },
-      })
+      try {
+        await putPart({
+          code,
+          uploadId,
+          partNumber,
+          blob,
+          signal: partSignal,
+          onSent: (sent) => {
+            /**
+             * 不能用 max 兜底：重试时旧连接可能已经发到 8 MiB，新连接从 0 开始，
+             * 取 max 会让进度卡在旧值上一整个分片的时长。直接覆盖，允许回退
+             * 最多一个分片（0.4%），比「不动」好判断得多。
+             */
+            inflight.set(partNumber, sent)
+            emit()
+          },
+        })
+      } catch (err) {
+        // 被 pauseController 掐断的：这是暂停，不是用户取消
+        if (err?.name === 'AbortError') {
+          if (shouldPause?.()) throw new PausedError()
+          throw err
+        }
+        throw err
+      }
 
       inflight.delete(partNumber)
       doneBytes += blob.size
       emit(true)
+
+      // 自己这片已经落地，且收到了暂停请求：手里这一片算数，让其它在传的立刻停
+      if (shouldPause?.()) {
+        pauseController.abort()
+        throw new PausedError()
+      }
     }
   }
 
   const workers = Math.max(1, Math.min(concurrency, pending.length || 1))
   /**
-   * 用 allSettled 而不是 all：一个 worker 收到暂停信号就抛了，另外两个
-   * 还在传当前这片。必须等它们传完（落地），否则暂停前那几片全白传。
+   * 用 allSettled：暂停时第一个跑完的 worker 会 abort 其余在传的，
+   * 它们以 AbortError 结束而不是在这里抛出去 —— 全部 settle 才是真的停了。
    */
   const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()))
   const failed = settled.find((r) => r.status === 'rejected')?.reason

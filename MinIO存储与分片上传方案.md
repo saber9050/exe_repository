@@ -327,9 +327,16 @@ function planParts(size, { minPart = MIN_PART, maxParts = MAX_PARTS, requested =
 软暂停的实现要点：
 
 - `shouldPause()` 在 worker 循环开头检查，命中就抛 `PausedError`（自定义，不是 `AbortError`）。
-- 用 `Promise.allSettled` 而不是 `all`：一个 worker 抛了，另外两个还在传当前这片，
-  必须等它们落地，否则暂停前那几片白传。
+- **只留最先完成的那一片**：第一个跑完的 worker 调 `pauseController.abort()`，其余在传的
+  立刻中断。不这么做的话 3 个 worker 都卡在 `await putPart`，每个都要等自己那片传完，
+  实际等待时间是最慢那片 —— 慢速网络下点暂停要等好几分钟。
+- 被中断的 worker 拿到的是 `AbortError`，用 `shouldPause()` 区分「暂停」与「取消」：
+  是暂停就转成 `PausedError`，是取消就原样抛出。
+- 用 `Promise.allSettled` 而不是 `all`：全部 settle 才是真的停住了。
 - 前端按 `PausedError` 进 `paused` 态，不按 `AbortError`；后者只用于「取消」。
+
+代价：最多丢 2 片（16 MiB）已传字节。换来的是「点暂停 1~2 秒内必停」，
+比等 3 片快一个数量级，也比「从头再来」划算。
 
 ### 6.7 过期清理
 

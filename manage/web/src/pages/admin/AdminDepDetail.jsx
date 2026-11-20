@@ -479,7 +479,7 @@ export default function AdminDepDetail() {
       return {
         label: `${progress}%`,
         left: `正在暂停 · ${size}`,
-        right: '等待当前分片写入…',
+        right: '等最后一片写完，其余已停止',
       }
     }
     if (progress >= 100) return { label: '100%', left: '上传完成', right: '' }
@@ -821,7 +821,7 @@ export default function AdminDepDetail() {
                   className="btn btn--secondary"
                   onClick={togglePause}
                   disabled={phase === 'hashing' || pausing}
-                  title={phase === 'hashing' ? '校验和计算中，暂时无法暂停' : pausing ? '正在等待当前分片写入' : ''}
+                  title={phase === 'hashing' ? '校验和计算中，暂时无法暂停' : pausing ? '正在等最后一片写完' : ''}
                 >
                   {phase === 'paused' ? '继续' : pausing ? '暂停中…' : '暂停'}
                 </button>
