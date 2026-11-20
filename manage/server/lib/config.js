@@ -83,8 +83,6 @@ export const config = {
     prefix: (process.env.MINIO_PREFIX || '').replace(/^\/+|\/+$/g, ''),
     // 桶不存在时自动创建（默认私有，不挂任何匿名策略）
     autoCreateBucket: bool(process.env.MINIO_AUTO_CREATE_BUCKET, true),
-    // 中断的分片多久后由存储侧自动清理；0 表示不配这条生命周期规则
-    abortIncompleteDays: num(process.env.MINIO_ABORT_INCOMPLETE_DAYS, 1),
   },
 
   /* ---------------- 依赖库 ---------------- */
