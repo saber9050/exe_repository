@@ -184,7 +184,6 @@ export function createManageApp(options = {}) {
     try {
       const result = await objectStore.ensureBucket({
         autoCreate: config.minio.autoCreateBucket,
-        abortIncompleteDays: config.minio.abortIncompleteDays,
       })
       const where = `${config.minio.endpoint}:${config.minio.port}/${config.minio.bucket}`
       if (result.created) {
@@ -193,16 +192,6 @@ export function createManageApp(options = {}) {
       log(`[manage] 对象存储可用 ${where}`)
       storageReady = true
 
-      if (result.lifecycle === 'unsupported') {
-        log(
-          '[manage] 当前 MinIO 版本不支持「中断分片自动清理」的生命周期规则，已跳过。' +
-            '过期会话仍由服务端 TTL 兜底（查询会话时触发 Abort）；' +
-            '要让存储侧自动回收，需要升级 MinIO 到支持 AbortIncompleteMultipartUpload 的版本。',
-        )
-      }
-      if (result.lifecycle === 'forbidden') {
-        log('[manage] 配不了生命周期规则：凭据缺少 PutBucketLifecycleConfiguration 权限，已跳过（不影响上传下载）')
-      }
       if (result.publicRead) {
         log(
           `[manage] 警告：桶 ${config.minio.bucket} 的策略允许匿名读，` +

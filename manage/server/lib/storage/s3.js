@@ -11,7 +11,6 @@
  *   3. 这一层只做「对象读写」，任何业务判定（可见性 / 版本状态）都在上层
  */
 import { Readable } from 'node:stream'
-import crypto from 'node:crypto'
 import {
   S3Client,
   PutObjectCommand,
@@ -27,7 +26,6 @@ import {
   HeadBucketCommand,
   CreateBucketCommand,
   GetBucketPolicyCommand,
-  PutBucketLifecycleConfigurationCommand,
 } from '@aws-sdk/client-s3'
 
 const unquote = (etag) => String(etag || '').replace(/^"+|"+$/g, '')
@@ -78,28 +76,14 @@ const storageError = (err) => {
 }
 
 /**
- * 老版本 MinIO（2022-01 这类）对 PutBucketLifecycle* 强制要求 Content-MD5，
- * 而 AWS SDK v3 早已不再自动计算（当年因为 FIPS 环境下的兼容问题去掉了）。
- * 不补这个头就会 400 `MissingContentMD5`。
+ * 注意：不要在这里配「中断分片自动清理」的生命周期规则。
  *
- * 命令级 middleware：只影响这一条请求，不污染其它调用。
+ * MinIO 全线不支持 AbortIncompleteMultipartUpload 这个 lifecycle 动作
+ * （官方 S3 兼容性文档在 multipart 章节明确列为差异项，任何版本都会 400），
+ * 而且根本不需要：MinIO 服务端自带 stale uploads 清理，默认 24h 过期、
+ * 每 6h 扫一次（api stale_uploads_expiry / stale_uploads_cleanup_interval），
+ * 与桶上有没有 ILM 规则无关。
  */
-function withContentMd5(command) {
-  command.middlewareStack.add(
-    (next) => async (args) => {
-      const request = args.request
-      if (request?.body && !request.headers?.['Content-MD5']) {
-        const buf =
-          typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : Buffer.from(request.body)
-        request.headers = request.headers || {}
-        request.headers['Content-MD5'] = crypto.createHash('md5').update(buf).digest('base64')
-      }
-      return next(args)
-    },
-    { step: 'build', name: 'contentMd5' },
-  )
-  return command
-}
 
 export function createObjectStore(cfg) {
   const { endpoint, port, useSsl, accessKey, secretKey, bucket, region, prefix } = cfg
@@ -147,14 +131,16 @@ export function createObjectStore(cfg) {
     },
 
     /**
-     * 保证桶可用：不存在就建（默认私有），并配好「中断分片自动清理」的生命周期规则。
+     * 保证桶可用：不存在就建（默认私有）。只建桶 + 查策略，不碰生命周期规则。
+     *
+     * 中断分片的回收交给 MinIO 内建清理（见文件上方说明），这里不配 ILM。
      *
      * 幂等，可重复调用。并发启动时 CreateBucket 可能撞 409，视为成功。
      *
-     * @param {{ autoCreate?: boolean, abortIncompleteDays?: number }} options
-     * @returns {{ exists: boolean, created: boolean, lifecycle: 'ok'|'skipped'|'unsupported', publicRead: boolean }}
+     * @param {{ autoCreate?: boolean }} options
+     * @returns {{ exists: boolean, created: boolean, publicRead: boolean }}
      */
-    async ensureBucket({ autoCreate = true, abortIncompleteDays = 1 } = {}) {
+    async ensureBucket({ autoCreate = true } = {}) {
       let exists = await this.headBucket()
 
       if (!exists && !autoCreate) {
@@ -176,48 +162,9 @@ export function createObjectStore(cfg) {
         }
       }
 
-      let lifecycle = 'ok'
-      let lifecycleError = ''
-      if (abortIncompleteDays > 0) {
-        try {
-          await client.send(
-            withContentMd5(
-              new PutBucketLifecycleConfigurationCommand({
-                Bucket: bucket,
-                LifecycleConfiguration: {
-                  Rules: [
-                    {
-                      ID: 'abort-incomplete-multipart',
-                      Status: 'Enabled',
-                      Filter: { Prefix: 'deps/' },
-                      AbortIncompleteMultipartUpload: {
-                        DaysAfterInitiation: abortIncompleteDays,
-                      },
-                    },
-                  ],
-                },
-              }),
-            ),
-          )
-        } catch (err) {
-          /**
-           * 两种失败要分开：
-           *   403 —— 凭据没有 PutBucketLifecycleConfiguration 权限
-           *   其它 —— 老版本 MinIO 的 lifecycle schema 不认 AbortIncompleteMultipartUpload
-           *           （实测 RELEASE.2022-01-04 直接 400 InvalidRequest，
-           *            但同一份规则里的 Expiration 是能通过的）
-           * 都不影响主流程：中断分片还有 Hub 侧的会话 TTL 兜底。
-           */
-          lifecycle = err?.$metadata?.httpStatusCode === 403 ? 'forbidden' : 'unsupported'
-          lifecycleError = err?.message || err?.name || ''
-        }
-      }
-
       return {
         exists,
         created,
-        lifecycle,
-        lifecycleError,
         publicRead: await this.bucketAllowsAnonymousRead(),
       }
     },
