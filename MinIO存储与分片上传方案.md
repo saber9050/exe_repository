@@ -171,15 +171,19 @@ manifest 不需要为此多存一个字段：
 
 ### 4.5 桶初始化
 
-服务启动时 `ensureBucket()` 做三件事，全部幂等：
+服务启动时 `ensureBucket()` 做两件事，全部幂等：
 
 | 步骤 | 行为 | 失败处理 |
 | --- | --- | --- |
 | 1. `HeadBucket` | 桶不存在且 `MINIO_AUTO_CREATE_BUCKET=true` → `CreateBucket` | 关闭自动创建时抛 `BucketNotFound`，日志提示手工建桶 |
 | 2. 公开策略检测 | 读 bucket policy，发现允许匿名 `s3:GetObject` 就告警 | 只告警，不擅自改别人的策略 |
-| 3. 生命周期规则 | 配 `AbortIncompleteMultipartUpload: 1 天` | 版本不支持或权限不足时跳过，靠服务端 TTL 兜底 |
 
 **建桶时不带任何 ACL / Policy**，S3 与 MinIO 的新桶默认就是私有。
+
+**这里刻意不配生命周期规则。** MinIO 全线不支持 `PutBucketLifecycleConfiguration` 里的
+`AbortIncompleteMultipartUpload`（官方 S3 兼容性文档 multipart 章节明确列为差异项），
+任何版本都是 400，不是版本高低的问题。中断分片的回收由 MinIO 服务端内建清理负责，
+与桶上的 ILM 规则无关，详见 [6.7 过期清理](#67-过期清理)。
 
 ### 4.6 私有桶为什么不影响下载
 
@@ -340,26 +344,24 @@ function planParts(size, { minPart = MIN_PART, maxParts = MAX_PARTS, requested =
 
 ### 6.7 过期清理
 
-两道保险：
+两套机制，各管一段：
 
-1. **Hub 侧**：会话 `expiresAt`（默认 24h），查会话/列会话时惰性 Abort 并清掉。
-2. **MinIO 侧**：桶生命周期规则，兜住 Hub 重启/崩溃留下的孤儿分片。
+1. **Hub 侧**：会话 `expiresAt`（默认 24h）。`get` / `list` / `findActive` 命中过期会话时
+   惰性 `AbortMultipartUpload` 并删掉 `meta/uploads/{id}.json`。
+2. **MinIO 侧**：服务端内建的 stale uploads 清理，兜住 Hub 重启/崩溃留下的孤儿分片。
 
-> **版本限制**：`AbortIncompleteMultipartUpload` 是较新版本才支持的规则。
-> 实测 `RELEASE.2022-01-04` 会直接 400 `InvalidRequest`（同一份规则里的
-> `Expiration` 却能通过），此时服务会跳过配置并打日志，清理退化为「靠 TTL +
-> 查询触发」。要存储侧自动回收，升级 MinIO 即可，代码不用改。
+> **MinIO 侧的清理是服务端行为，不是桶上的 ILM 规则。** 默认把超过 24h 未写入的分片上传
+> 清掉（`api stale_uploads_expiry`），每 6h 扫一次（`api stale_uploads_cleanup_interval`），
+> 可用 `MINIO_API_STALE_UPLOADS_EXPIRY` / `MINIO_API_STALE_UPLOADS_CLEANUP_INTERVAL` 覆盖。
+> 判定依据是 uploadID 目录的最后写入时间，持续有分片落盘的长传输不会被误删。
+>
+> **不要试图用 `AbortIncompleteMultipartUpload` 接管这件事**：MinIO 全线不支持这个
+> lifecycle 动作（官方 S3 兼容性文档 multipart 章节明确列为差异项），任何版本都返回 400。
 
-```json
-{
-  "Rules": [{
-    "ID": "abort-incomplete-multipart",
-    "Status": "Enabled",
-    "Filter": { "Prefix": "deps/" },
-    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
-  }]
-}
-```
+Hub 侧的惰性清理有个前提：**得有人碰这条会话**。正常链路（续传探测、暂停取消、重复
+`complete`）都会触发；但如果客户端传到一半消失，之后既没有人重传同一版本、也没有人调
+`GET /server/deps/{code}/uploads`，那条会话 JSON 会一直留着（分片本身仍由 MinIO 在 24h
+内回收）。量级是几百字节一个文件，可忽略；要彻底清干净可以再加一层定时清扫。
 
 ### 6.8 完整时序
 
@@ -541,7 +543,6 @@ MINIO_BUCKET=dep-artifacts
 MINIO_REGION=us-east-1
 MINIO_PREFIX=
 MINIO_AUTO_CREATE_BUCKET=true      # 桶不存在时自动建（默认私有）
-MINIO_ABORT_INCOMPLETE_DAYS=1      # 中断分片多久后清理；0 = 不配该规则
 
 # 分片
 DEP_PART_SIZE=8388608         # 8 MiB
